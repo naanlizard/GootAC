@@ -1,0 +1,29 @@
+# ESP8266 RTOS SDK and PlatformIO build artifacts
+build/
+.pio/
+sdkconfig
+sdkconfig.old
+*.pyc
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets
+src/config.h
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs
+*.log

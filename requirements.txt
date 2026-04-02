@@ -1,0 +1,4 @@
+click>=8.0.0
+zeroconf>=0.30.0
+pyserial>=3.5
+platformio>=5.0.0
