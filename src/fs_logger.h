@@ -58,8 +58,8 @@ public:
         bool wipe = false;
         File f = LittleFS.open("/system.log.old", "r");
         if (f) {
-            // Size limit: 64KB
-            if (f.size() > 65536) {
+            // Size limit: 256KB
+            if (f.size() > 262144) {
                 wipe = true;
             }
             // Age limit: 7 days

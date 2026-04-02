@@ -20,7 +20,6 @@ MDNS_SERVICE_TYPE = "_arduino._tcp.local." # Primary mDNS service to browse
 KEY_PROJECT = "project"
 KEY_VERSION = "version"
 KEY_UPTIME  = "uptime"
-KEY_HEAP    = "heap"
 KEY_RSSI    = "rssi"
 KEY_SDK     = "sdk"
 
@@ -54,7 +53,6 @@ class GootACDiscovery:
                         "address": ip,
                         "version": properties.get(KEY_VERSION, "?.?.?"),
                         "uptime": properties.get(KEY_UPTIME, "N/A"),
-                        "heap": properties.get(KEY_HEAP, "N/A"),
                         "rssi": properties.get(KEY_RSSI, "N/A"),
                         "sdk": properties.get(KEY_SDK, "N/A")
                     })
@@ -87,7 +85,6 @@ class GootACDiscovery:
                     "address": port.device,
                     "version": "Local",
                     "uptime": "-",
-                    "heap": "-",
                     "rssi": "-",
                     "sdk": "-"
                 })
@@ -174,7 +171,7 @@ def display_devices_table(devices, title="Discovered Devices", target_version=No
 
     click.echo(f"\n{title}:")
     # Table Header
-    header = f"{'#':<3} {'Type':<12} {'Name/Host':<20} {'Address':<15} {'Ver':<8} {'Uptime':<8} {'Heap':<8} {'RSSI':<6} {'SDK':<10}"
+    header = f"{'#':<3} {'Type':<12} {'Name/Host':<20} {'Address':<15} {'Ver':<8} {'Uptime':<8} {'RSSI':<6} {'SDK':<10}"
     click.echo(header)
     click.echo("-" * len(header))
     
@@ -198,13 +195,12 @@ def display_devices_table(devices, title="Discovered Devices", target_version=No
         dev_name = f"{name[:20]:<20}"
         addr = f"{dev['address']:<15}"
         uptime = f"{dev['uptime']:<8}"
-        heap = f"{dev['heap']:<8}"
         rssi = f"{dev['rssi']:<6}"
         sdk = f"{dev['sdk']:<10}"
 
         click.echo(f"{line_num} {dev_type} {dev_name} {addr} ", nl=False)
         click.echo(f"{ver_str:<8}" if not is_old else ver_str + " " * (8 - len(dev['version'])), nl=False)
-        click.echo(f" {uptime} {heap} {rssi} {sdk}")
+        click.echo(f" {uptime} {rssi} {sdk}")
 
     click.echo("")
     return True
