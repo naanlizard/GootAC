@@ -203,7 +203,6 @@ void setup_ota() {
 
   // NOTE: mDNS TXT values MUST stay in scope or be copied by the library.
   // We use the 60s loop to update dynamic values safely.
-  MDNS.addServiceTxt("arduino", "tcp", "heap", "0");
   MDNS.addServiceTxt("arduino", "tcp", "rssi", "0");
   MDNS.addServiceTxt(
       "arduino", "tcp", "sdk",
@@ -288,7 +287,6 @@ void loop() {
   if (millis() - lastUptimeUpdate > 60000) {
     lastUptimeUpdate = millis();
     MDNS.addServiceTxt("arduino", "tcp", "uptime", getUptimeString());
-    MDNS.addServiceTxt("arduino", "tcp", "heap", String(ESP.getFreeHeap()));
     MDNS.addServiceTxt("arduino", "tcp", "rssi", String(WiFi.RSSI()));
   }
 
