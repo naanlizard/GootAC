@@ -10,7 +10,7 @@
 // ACCESSORY_NAME: Display name in the Apple Home app
 #define HOST_NAME      "gootac-bedroom"
 #define ACCESSORY_NAME "Bedroom AC"
-#define FW_VERSION     "1.0"
+#define FW_VERSION     "1.1"
 
 // --- System Behavior ---
 // FORCE_HK_START: If true, the HomeKit server will initialize immediately 
