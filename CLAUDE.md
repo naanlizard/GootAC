@@ -29,11 +29,13 @@ pio run -t erase
 
 The management utility `manage.py` wraps these commands with mDNS device discovery:
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-python manage.py list          # discover devices on network + USB
-python manage.py update        # OTA update with interactive device selection
-python manage.py install       # factory flash a new device via USB
-python manage.py monitor       # serial monitor
+python3 manage.py list          # discover devices on network + USB
+python3 manage.py update        # OTA update with interactive device selection
+python3 manage.py install       # factory flash a new device via USB
+python3 manage.py monitor       # serial monitor
 ```
 
 ## Configuration

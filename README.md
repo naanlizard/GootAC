@@ -70,6 +70,14 @@ pio run -t upload --upload-port <DEVICE_IP_ADDRESS>
 
 The included `manage.py` utility handles routine administrative tasks, discovery, and automated updates.
 
+### Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
 ### Commands
 
 | Command | Description |
