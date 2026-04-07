@@ -347,7 +347,7 @@ void update_physical_ac() {
         } else if (roomTemp > coolThr) {
           hpPower = true; hpMode = 2; hpTemp = coolThr;
         } else {
-          hpPower = false; // Stay OFF while within target range
+          hpPower = true; hpMode = 3; // FAN: circulate air while in deadband
         }
       } else {
         hpPower = true; hpMode = 4; // Native AUTO if room temp unknown
