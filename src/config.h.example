@@ -6,10 +6,9 @@
 #define WIFI_PASS     "YOUR_PASSWORD"
 
 // --- Device Identity ---
-// HOST_NAME: Network and mDNS hostname (alphanumeric, no spaces)
-// ACCESSORY_NAME: Display name in the Apple Home app
-#define HOST_NAME      "gootac-bedroom"
-#define ACCESSORY_NAME "Bedroom AC"
+// DEVICE_NAME: Human-readable name for this unit (e.g., "Bedroom", "Suite")
+// Firmware derives: hostname "GootAC-Bedroom", accessory name "Bedroom AC"
+#define DEVICE_NAME    "Bedroom"
 #define FW_VERSION     "1.1"
 
 // --- System Behavior ---

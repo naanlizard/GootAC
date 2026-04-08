@@ -5,14 +5,15 @@
 #include "config.h"
 
 extern char hostName[32];
+extern char accessoryName[32];
  
 // Identify callback (required by HAP spec)
 void my_accessory_identify(homekit_value_t _value) {
     ac_controller_identify();
 }
 
-homekit_characteristic_t cha_name = HOMEKIT_CHARACTERISTIC_(NAME, ACCESSORY_NAME);
-homekit_characteristic_t cha_conf_name = HOMEKIT_CHARACTERISTIC_(CONFIGURED_NAME, ACCESSORY_NAME);
+homekit_characteristic_t cha_name = HOMEKIT_CHARACTERISTIC_(NAME, "GootAC");
+homekit_characteristic_t cha_conf_name = HOMEKIT_CHARACTERISTIC_(CONFIGURED_NAME, "GootAC");
 
 // HeaterCooler Service
 homekit_characteristic_t cha_ac_active = HOMEKIT_CHARACTERISTIC_(ACTIVE, 0);
@@ -60,7 +61,7 @@ homekit_accessory_t *accessories[] = {
         }),
         HOMEKIT_SERVICE(HUMIDIFIER_DEHUMIDIFIER, .characteristics = (homekit_characteristic_t*[]) {
             HOMEKIT_CHARACTERISTIC(NAME, "AC Dehumidifier"),
-            HOMEKIT_CHARACTERISTIC(CONFIGURED_NAME, ACCESSORY_NAME " Dehumidifier"),
+            HOMEKIT_CHARACTERISTIC(CONFIGURED_NAME, "Dehumidifier"),
             &cha_dehumidifier_active,
             &cha_dehumidifier_current_state,
             &cha_dehumidifier_target_state,

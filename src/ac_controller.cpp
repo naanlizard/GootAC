@@ -280,6 +280,11 @@ void set_dehumidifier_target_state(homekit_value_t value) {
 void ac_controller_init(HeatPump *heatPumpInstance) {
   hp = heatPumpInstance;
 
+  // Set accessory display names from runtime-derived accessoryName
+  extern char accessoryName[];
+  cha_name.value.string_value = accessoryName;
+  cha_conf_name.value.string_value = accessoryName;
+
   load_target_state();
 
   cha_ac_active.value.uint8_value = currentState.active;

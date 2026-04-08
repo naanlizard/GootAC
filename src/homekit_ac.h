@@ -10,6 +10,10 @@ extern "C" {
 // Main configuration object used by the HomeKit daemon
 extern homekit_server_config_t config;
 
+// Accessory Name Characteristics (set at runtime from DEVICE_NAME)
+extern homekit_characteristic_t cha_name;
+extern homekit_characteristic_t cha_conf_name;
+
 // HeaterCooler Characteristics (Main AC Tile)
 extern homekit_characteristic_t cha_ac_active;
 extern homekit_characteristic_t cha_ac_current_state;

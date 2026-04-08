@@ -36,6 +36,7 @@ extern "C" {
 
 ESP8266WebServer server(80);
 char hostName[32];
+char accessoryName[32];
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_PASS;
 
@@ -228,14 +229,13 @@ void setup() {
   // Use 160MHz for crypto performance (HomeKit requirement)
   system_update_cpu_freq(160);
 
-  // Set unique hostname based on MAC if default is used
-  if (strcmp(HOST_NAME, "GootAC") == 0) {
-    uint8_t mac[6];
-    WiFi.macAddress(mac);
-    snprintf(hostName, sizeof(hostName), "GootAC-%02X%02X%02X", mac[3], mac[4],
-             mac[5]);
-  } else {
-    strncpy(hostName, HOST_NAME, sizeof(hostName));
+  // Derive hostname and accessory name from DEVICE_NAME
+  snprintf(hostName, sizeof(hostName), "GootAC-%s", DEVICE_NAME);
+  snprintf(accessoryName, sizeof(accessoryName), "%s AC", DEVICE_NAME);
+
+  // Sanitize hostname: replace spaces/invalid chars with dashes
+  for (char *p = hostName; *p; p++) {
+    if (*p == ' ' || !isalnum(*p)) *p = '-';
   }
 
   // Serial1 (UART1) is disabled. UART0 is strictly reserved for the AC CN105
@@ -254,7 +254,9 @@ void setup() {
   // Configuration Audit
   GLOG_BOOT("--- CONFIG ---");
   GLOG_BOOT("WIFI_SSID: %s", WIFI_SSID);
-  GLOG_BOOT("HOST_NAME: %s", HOST_NAME);
+  GLOG_BOOT("DEVICE_NAME: %s", DEVICE_NAME);
+  GLOG_BOOT("Hostname: %s", hostName);
+  GLOG_BOOT("Accessory: %s", accessoryName);
   GLOG_BOOT("FORCE_HK_START: %s", FORCE_HK_START ? "YES" : "NO");
   GLOG_BOOT("--------------");
 
