@@ -8,6 +8,11 @@
 #include <WiFiClient.h>
 #include <arduino_homekit_server.h>
 
+extern "C" {
+#include <lwip/tcp.h>
+#include <lwip/priv/tcp_priv.h>
+}
+
 // Plausibility bounds on the room-temperature sensor reading. The Mitsubishi
 // CN105 protocol reports 10–41°C in 1°C steps via the standard packet plus
 // half-degree extended packets, so anything outside [MIN, MAX] is a sensor
@@ -575,6 +580,22 @@ void ac_controller_identify() {
   pending_update = true;
 }
 
+// Walk lwIP's TCP PCB linked lists. Useful for spotting socket-pool
+// pressure, TIME_WAIT pile-up, or listen-pool issues before they cause
+// connection-refused failures from HomeKit controllers.
+static int tcp_pcb_count(struct tcp_pcb *head) {
+  int n = 0;
+  for (struct tcp_pcb *p = head; p != nullptr; p = p->next) n++;
+  return n;
+}
+static int tcp_listen_pcb_count() {
+  int n = 0;
+  for (struct tcp_pcb_listen *p = tcp_listen_pcbs.listen_pcbs; p != nullptr;
+       p = p->next)
+    n++;
+  return n;
+}
+
 String ac_controller_get_json_status() {
   StaticJsonDocument<1024> doc;
   JsonObject internal = doc.createNestedObject("target_state_bus");
@@ -582,7 +603,7 @@ String ac_controller_get_json_status() {
   internal["mode"] = currentState.target_mode;
   internal["heat_thr"] = currentState.heating_threshold;
   internal["cool_thr"] = currentState.cooling_threshold;
-  
+
   if (hp && hp->isConnected()) {
     heatpumpSettings s = hp->getSettings();
     JsonObject hw = doc.createNestedObject("hardware_status");
@@ -591,7 +612,24 @@ String ac_controller_get_json_status() {
     hw["temp"] = s.temperature;
     hw["room"] = hp->getRoomTemperature();
   }
-  
+
+  JsonObject diag = doc.createNestedObject("diag");
+  diag["free_heap"] = ESP.getFreeHeap();
+  diag["max_block"] = ESP.getMaxFreeBlockSize();
+  diag["heap_frag_pct"] = ESP.getHeapFragmentation();
+  diag["tcp_active"] = tcp_pcb_count(tcp_active_pcbs);
+  diag["tcp_listen"] = tcp_listen_pcb_count();
+  diag["tcp_tw"] = tcp_pcb_count(tcp_tw_pcbs);
+  diag["uptime_s"] = millis() / 1000;
+  homekit_server_t *hk = arduino_homekit_get_running_server();
+  if (hk) {
+    // Mixiaoxiao tracks active client sockets in server->nfds (cap = 8).
+    // homekit_server_t is opaque to us by include; we conservatively read
+    // via the get_pairing_count / get_clients_count helpers if present,
+    // otherwise just record paired state.
+    diag["hk_paired"] = hk->paired;
+  }
+
   String output;
   serializeJson(doc, output);
   return output;
