@@ -92,6 +92,15 @@ Mitsubishi indoor unit
 - `ARDUINO_HOMEKIT_LOWROM` / `ARDUINO_HOMEKIT_SKIP_ED25519_VERIFY` — Memory optimizations required for ESP8266
 - CPU runs at 160MHz for HomeKit crypto performance
 
+### Logging Format Specifiers (GLOG_* macros)
+
+The `GLOG_INFO/TRACE/WARN/ERROR` macros delegate to ArduinoLog (thijse/Arduino-Log), which has its **own non-printf format parser**. The single character after `%` is the entire specifier — width and length modifiers are **not** parsed and silently consume the wrong things:
+
+- ✅ Works: `%s %S %d %i %u %l %F %D %x %X %p %b %B %c %C %t %T`
+- ❌ Silently broken: `%02X` `%5d` `%lu` `%lus` — the parser sees `%` then the first char as the specifier, then the rest as literal text. The format arg is left unconsumed, so any subsequent format args shift down by one. This is especially bad for `GLOG_TRACE` and `GLOG_ERROR` which append `(Heap: %u)` — the heap counter reads the wrong arg.
+
+When you need a hex byte or padded int, snprintf into a small char buffer first and pass it via `%s` — see the existing `subTypeHex` pattern in `HeatPump.cpp`.
+
 ### Maintenance Behavior
 
 The firmware auto-reboots after 24h (if AC idle) or 48h (unconditionally) to mitigate memory fragmentation and HomeKit session exhaustion. WiFi loss > 2 minutes also triggers a reboot.
