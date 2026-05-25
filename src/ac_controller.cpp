@@ -119,7 +119,6 @@ void load_target_state() {
   }
 }
 
-static bool block_sync = false;
 static bool pending_update = false;
 static bool pending_sync_request = false;
 
@@ -284,11 +283,6 @@ void set_dehumidifier_active(homekit_value_t value) {
   update_state("HomeKit Dehumidifier Active change");
 }
 
-void set_dehumidifier_target_state(homekit_value_t value) {
-  cha_dehumidifier_target_state.value = value;
-  HKLOG_INFO("Characteristic Set Dehumidifier Target State -> %u", value.uint8_value);
-}
-
 // --- Deprecated Fan Mode removed ---
 
 // ----------------------------------------------------
@@ -322,8 +316,7 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
   cha_ac_rotation_speed.setter = set_ac_rotation_speed;
   cha_ac_swing_mode.setter = set_ac_swing_mode;
   cha_dehumidifier_active.setter = set_dehumidifier_active;
-  cha_dehumidifier_target_state.setter = set_dehumidifier_target_state;
-  
+
   // Enable IR remote change detection in the library
   hp->enableExternalUpdate();
 
@@ -338,8 +331,6 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
 
   arduino_homekit_setup(&config);
 }
-
-void ac_controller_report_status() {}
 
 void update_physical_ac() {
   if (!hp || !hp->isConnected()) return;
@@ -459,7 +450,6 @@ void update_physical_ac() {
     GLOG_INFO("MITSUBISHI", "Updating physical AC unit...");
     hp->update();
     save_target_state();
-    block_sync = true;
     if (changed) pending_sync_request = true;
   }
 }
@@ -623,11 +613,8 @@ String ac_controller_get_json_status() {
   diag["uptime_s"] = millis() / 1000;
   homekit_server_t *hk = arduino_homekit_get_running_server();
   if (hk) {
-    // Mixiaoxiao tracks active client sockets in server->nfds (cap = 8).
-    // homekit_server_t is opaque to us by include; we conservatively read
-    // via the get_pairing_count / get_clients_count helpers if present,
-    // otherwise just record paired state.
     diag["hk_paired"] = hk->paired;
+    diag["hk_clients"] = hk->nfds;
   }
 
   String output;

@@ -35,7 +35,6 @@ typedef struct HeatPump HeatPump;
 void ac_controller_init(HeatPump* heatPumpInstance);
 void ac_controller_loop();
 void ac_controller_sync_from_ac();
-void ac_controller_report_status();
 void ac_controller_identify();
 
 #ifdef __cplusplus

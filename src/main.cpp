@@ -48,13 +48,10 @@ char accessoryName[32];
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_PASS;
 
-unsigned long lastHeartbeatTime = 0;
 unsigned long lastUptimeUpdate = 0;
-unsigned long lastCapabilitiesTime = 0;
 
 HeatPump hp;
 bool homekitStarted = false;
-bool serial_disabled = false;
 
 // Persistent reset info tracking (values captured in setup_wifi)
 String previousResetInfo = "";
@@ -112,8 +109,6 @@ extern "C" void udp_log_printf(const char *fmt, ...) {
     Log.traceln("%s", buf);
   }
 }
-
-void logMsg(const char *id, const char *msg) { GLOG_INFO(id, "%s", msg); }
 
 // Helper to get formatted uptime string
 String getUptimeString() {
@@ -336,13 +331,8 @@ void setup() {
   GLOG_INFO("BOOT", "Connecting to AC physical unit (CN105)...");
   hp.connect(&Serial);
 
-  // HomeKit Push Updates: Trigger sync immediately when AC data is received
-  hp.setStatusChangedCallback([](heatpumpStatus status) {
-    if (homekitStarted) {
-      GLOG_TRACE("MITSUBISHI", "Status change callback triggered by physical unit");
-      ac_controller_sync_from_ac();
-    }
-  });
+  // status-change callback is registered later in ac_controller_init();
+  // HeatPump uses a single-slot std::function, so the one set there wins.
 
   GLOG_BOOT("Setup complete! Entering loop...");
 }
@@ -418,13 +408,6 @@ void loop() {
       }
     }
   } else {
-    homekit_server_t *hk = arduino_homekit_get_running_server();
-    if (hk && hk->paired && serial_disabled) {
-      GLOG_INFO("BOOT", "Device paired! Restoring Serial communication...");
-      hp.connect(&Serial); // This will call Serial.begin() internally
-      serial_disabled = false;
-    }
-
     ac_controller_loop();
 
     // Every 60 seconds, report previous crash for 24h visibility
@@ -435,14 +418,5 @@ void loop() {
         lastResetReport = millis();
       }
     }
-
-    // Heartbeat & Status Report (every 10s)
-    if (millis() - lastHeartbeatTime > 10000) {
-      lastHeartbeatTime = millis();
-      if (!serial_disabled) {
-        ac_controller_report_status();
-      }
-    }
-
   }
 }
