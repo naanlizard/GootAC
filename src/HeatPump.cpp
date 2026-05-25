@@ -658,7 +658,8 @@ int HeatPump::readPacket() {
         delay(10); // found that this delay increases accuracy when reading,
                    // might not be needed though
       } else {
-        GLOG_TRACE("MITSUBISHI", "Skipping noise byte: 0x%02X", header[0]);
+        char hex[3]; snprintf(hex, 3, "%02X", header[0]);
+        GLOG_TRACE("MITSUBISHI", "Skipping noise byte: 0x%s", hex);
       }
       ESP.wdtFeed();
       yield();
@@ -919,9 +920,12 @@ int HeatPump::readPacket() {
           return RCVD_PKT_CONNECT_SUCCESS;
         }
       } else {
+        char calcHex[3], recvHex[3];
+        snprintf(calcHex, 3, "%02X", checksum);
+        snprintf(recvHex, 3, "%02X", data[dataLength]);
         GLOG_WARN("MITSUBISHI",
-                  "Checksum Mismatch! Calculated: %02X, Received: %02X",
-                  checksum, data[dataLength]);
+                  "Checksum Mismatch! Calculated: %s, Received: %s",
+                  calcHex, recvHex);
       }
     } else {
       GLOG_TRACE("MITSUBISHI", "Header mismatch. Packet discarded.");
