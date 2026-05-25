@@ -12,6 +12,14 @@
 
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
+// Upstream Mixiaoxiao's base64 implementation collides with the Arduino
+// core's `class base64`. Forward-declare the lib's encoder in its own
+// namespace to win the link order without modifying the lib.
+namespace base64 {
+extern String encode(const uint8_t *data, size_t length,
+                     bool usePadding = true);
+extern String encode(const String &text, bool usePadding = true);
+}
 #include <ESP8266WebServer.h>
 extern "C" {
 #include <user_interface.h>
