@@ -12,7 +12,15 @@
 #define FW_VERSION     "1.1"
 
 // --- System Behavior ---
-// FORCE_HK_START: If true, the HomeKit server will initialize immediately 
-// upon boot. If false, initialization waits for a successful handshake 
+// FORCE_HK_START: If true, the HomeKit server will initialize immediately
+// upon boot. If false, initialization waits for a successful handshake
 // with the Mitsubishi AC unit via the CN105 port.
 #define FORCE_HK_START false
+
+// --- Sensor Plausibility Bounds ---
+// Room-temperature readings outside [MIN, MAX] are rejected as sensor
+// glitches and not forwarded to HomeKit. Mitsubishi CN105 reports 10-41°C
+// natively, so values below 10°C are almost always parse errors or transient
+// uninitialized state. Tune for your climate; defaults match Lisbon.
+// #define MIN_VALID_ROOM_TEMP_C 10.0f
+// #define MAX_VALID_ROOM_TEMP_C 45.0f

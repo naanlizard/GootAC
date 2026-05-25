@@ -1,11 +1,24 @@
 #include "ac_controller.h"
 #include "homekit_ac.h"
+#include "config.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ArduinoLog.h>
 #include <LittleFS.h>
 #include <WiFiClient.h>
 #include <arduino_homekit_server.h>
+
+// Plausibility bounds on the room-temperature sensor reading. The Mitsubishi
+// CN105 protocol reports 10–41°C in 1°C steps via the standard packet plus
+// half-degree extended packets, so anything outside [MIN, MAX] is a sensor
+// glitch or parse error and must not be pushed to HomeKit. Defaults match
+// Lisbon climate; override in config.h.
+#ifndef MIN_VALID_ROOM_TEMP_C
+#define MIN_VALID_ROOM_TEMP_C 10.0f
+#endif
+#ifndef MAX_VALID_ROOM_TEMP_C
+#define MAX_VALID_ROOM_TEMP_C 45.0f
+#endif
 
 // Returns info about the current HomeKit client performing an action
 static String get_client_info() {
@@ -476,10 +489,21 @@ void ac_controller_sync_from_ac() {
 
   // 1. Update Current Temperature (Always)
   float roomTemp = hp->getRoomTemperature();
-  if (cha_ac_current_temp.value.float_value != roomTemp && roomTemp > 0) {
+  if (cha_ac_current_temp.value.float_value != roomTemp &&
+      roomTemp >= MIN_VALID_ROOM_TEMP_C &&
+      roomTemp <= MAX_VALID_ROOM_TEMP_C) {
     cha_ac_current_temp.value.float_value = roomTemp;
     homekit_characteristic_notify(&cha_ac_current_temp,
                                   cha_ac_current_temp.value);
+  } else if (roomTemp < MIN_VALID_ROOM_TEMP_C ||
+             roomTemp > MAX_VALID_ROOM_TEMP_C) {
+    char buf[12], minBuf[10], maxBuf[10];
+    dtostrf(roomTemp, 1, 2, buf);
+    dtostrf(MIN_VALID_ROOM_TEMP_C, 1, 1, minBuf);
+    dtostrf(MAX_VALID_ROOM_TEMP_C, 1, 1, maxBuf);
+    GLOG_TRACE("MITSUBISHI",
+               "Ignoring out-of-range room temp %sC (valid %s..%s)", buf,
+               minBuf, maxBuf);
   }
 
   // 2. Handle External Overrides (IR Remote / Physical Buttons)

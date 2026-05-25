@@ -4,6 +4,13 @@
 #include "ac_controller.h"
 #include "config.h"
 
+#ifndef MIN_VALID_ROOM_TEMP_C
+#define MIN_VALID_ROOM_TEMP_C 10.0f
+#endif
+#ifndef MAX_VALID_ROOM_TEMP_C
+#define MAX_VALID_ROOM_TEMP_C 45.0f
+#endif
+
 extern char hostName[32];
 extern char accessoryName[32];
  
@@ -19,7 +26,7 @@ homekit_characteristic_t cha_conf_name = HOMEKIT_CHARACTERISTIC_(CONFIGURED_NAME
 homekit_characteristic_t cha_ac_active = HOMEKIT_CHARACTERISTIC_(ACTIVE, 0);
 homekit_characteristic_t cha_ac_current_state = HOMEKIT_CHARACTERISTIC_(CURRENT_HEATER_COOLER_STATE, 0);
 homekit_characteristic_t cha_ac_target_state = HOMEKIT_CHARACTERISTIC_(TARGET_HEATER_COOLER_STATE, 0);
-homekit_characteristic_t cha_ac_current_temp = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 22.0, .min_value = (float[]) {0});
+homekit_characteristic_t cha_ac_current_temp = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 22.0, .min_value = (float[]) {MIN_VALID_ROOM_TEMP_C}, .max_value = (float[]) {MAX_VALID_ROOM_TEMP_C});
 homekit_characteristic_t cha_ac_cooling_threshold = HOMEKIT_CHARACTERISTIC_(COOLING_THRESHOLD_TEMPERATURE, 24.0, .min_value = (float[]) {16}, .max_value = (float[]) {31});
 homekit_characteristic_t cha_ac_heating_threshold = HOMEKIT_CHARACTERISTIC_(HEATING_THRESHOLD_TEMPERATURE, 18.0, .min_value = (float[]) {16}, .max_value = (float[]) {31});
 homekit_characteristic_t cha_ac_target_fan_state = HOMEKIT_CHARACTERISTIC_(TARGET_FAN_STATE, 0);
