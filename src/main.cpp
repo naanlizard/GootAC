@@ -190,6 +190,20 @@ void setup_webserver() {
     ESP.restart();
   });
 
+  // Plain reboot. Useful for recovering a unit stuck in a stale HK session
+  // without losing pairings. Requires ?confirm=yes.
+  server.on("/reboot", HTTP_GET, []() {
+    if (server.arg("confirm") != "yes") {
+      server.send(400, "application/json",
+                  "{\"error\":\"require ?confirm=yes\"}");
+      return;
+    }
+    GLOG_WARN("SYS", "/reboot invoked");
+    server.send(200, "application/json", "{\"ok\":true,\"action\":\"reboot\"}");
+    delay(200);
+    ESP.restart();
+  });
+
 #ifdef USE_FAKE_HEATPUMP
   // Diagnostic-only endpoints. Inject simulated IR-remote / sensor changes
   // so the controller's external-update path and HomeKit notifications can

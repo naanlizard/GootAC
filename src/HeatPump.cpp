@@ -92,7 +92,7 @@ bool HeatPump::connect(HardwareSerial *serial, bool retry) {
     _HardSerial = serial;
   }
   connected = false;
-  GLOG_INFO("MITSUBISHI", "Connecting to AC physical unit... Rate=%d", bitrate);
+  GLOG_TRACE("MITSUBISHI", "Connecting to AC physical unit... Rate=%d", bitrate);
   _HardSerial->begin(bitrate, SERIAL_8E1);
   if (onConnectCallback) {
     onConnectCallback();
@@ -126,8 +126,8 @@ bool HeatPump::connect(HardwareSerial *serial, bool retry) {
     }
   } else {
     connected = true;
-    GLOG_INFO("MITSUBISHI",
-              "Connection Successful! Physical unit acknowledged.");
+    GLOG_TRACE("MITSUBISHI",
+               "Connection Successful! Physical unit acknowledged.");
   }
   return packetType == RCVD_PKT_CONNECT_SUCCESS;
 }
@@ -182,9 +182,9 @@ bool HeatPump::update() {
 void HeatPump::sync(byte packetType) {
   _externalUpdateOccurred = false;
   if ((!connected) || (millis() - lastRecv > (PACKET_SENT_INTERVAL_MS * 10))) {
-    GLOG_INFO("MITSUBISHI",
-              "Connection lost or idle (last recv: %lus ago). Reconnecting...",
-              (millis() - lastRecv) / 1000);
+    GLOG_TRACE("MITSUBISHI",
+               "Connection lost or idle (last recv: %ls ago). Reconnecting...",
+               (millis() - lastRecv) / 1000);
     connect(NULL);
   } else if (canRead()) {
     readPacket();
