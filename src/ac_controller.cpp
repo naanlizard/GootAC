@@ -554,12 +554,24 @@ void ac_controller_sync_from_ac() {
   }
 
   if (cha_ac_current_state.value.uint8_value != current_state) {
-    GLOG_INFO("MITSUBISHI", "Status Change: %d -> %d (%s)", 
+    GLOG_INFO("MITSUBISHI", "Status Change: %d -> %d (%s)",
               cha_ac_current_state.value.uint8_value, current_state,
               current_state == 3 ? "Cooling" : current_state == 2 ? "Heating" : current_state == 1 ? "Idle" : "Off");
     cha_ac_current_state.value.uint8_value = current_state;
     homekit_characteristic_notify(&cha_ac_current_state,
                                   cha_ac_current_state.value);
+  }
+
+  // 4. Update Dehumidifier Current State (0:Inactive, 1:Idle, 3:Dehumidifying)
+  uint8_t dehum_state = 0;
+  if (cha_dehumidifier_active.value.uint8_value == 1) {
+    bool physOn = (strcmp(s.power, "ON") == 0);
+    dehum_state = (physOn && strcmp(s.mode, "DRY") == 0) ? 3 : 1;
+  }
+  if (cha_dehumidifier_current_state.value.uint8_value != dehum_state) {
+    cha_dehumidifier_current_state.value.uint8_value = dehum_state;
+    homekit_characteristic_notify(&cha_dehumidifier_current_state,
+                                  cha_dehumidifier_current_state.value);
   }
 }
 
