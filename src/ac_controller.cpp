@@ -132,8 +132,7 @@ static unsigned long identify_start = 0;
 
 // Helpers
 void update_state(const char *reason) {
-  if (reason)
-    GLOG_TRACE("MITSUBISHI", "State update requested. Reason: %s", reason);
+  GLOG_TRACE("MITSUBISHI", "State update requested. Reason: %s", reason);
   pending_update = true;
   lastInteractionTime = millis();
 }
