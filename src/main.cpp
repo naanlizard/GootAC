@@ -170,6 +170,26 @@ void setup_webserver() {
     server.send(200, "application/json", ac_controller_get_json_status());
   });
 
+  // Recovery endpoint: wipe HomeKit pairings + reboot. Needed when stale
+  // pairing data from a previous lib version leaves the device advertising
+  // sf=0 (paired) while no usable pairings exist, causing iOS to refuse with
+  // kCountErr -6764 because it tries pair-verify instead of pair-setup.
+  // Requires ?confirm=yes-wipe-pairings to prevent accidental triggers.
+  server.on("/hk_reset", HTTP_GET, []() {
+    if (server.arg("confirm") != "yes-wipe-pairings") {
+      server.send(400, "application/json",
+                  "{\"error\":\"require ?confirm=yes-wipe-pairings\"}");
+      return;
+    }
+    GLOG_WARN("HOMEKIT", "/hk_reset invoked: wiping pairings + rebooting");
+    server.send(200, "application/json",
+                "{\"ok\":true,\"action\":\"reset_and_reboot\"}");
+    delay(200);
+    homekit_server_reset();
+    delay(200);
+    ESP.restart();
+  });
+
 #ifdef USE_FAKE_HEATPUMP
   // Diagnostic-only endpoints. Inject simulated IR-remote / sensor changes
   // so the controller's external-update path and HomeKit notifications can
