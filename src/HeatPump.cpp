@@ -92,6 +92,9 @@ bool HeatPump::connect(HardwareSerial *serial, bool retry) {
     _HardSerial = serial;
   }
   connected = false;
+  // Reset the idle counter so the >10s "lost" check in sync() can't fire
+  // before the new connection has had a chance to receive its first packet.
+  lastRecv = millis();
   GLOG_TRACE("MITSUBISHI", "Connecting to AC physical unit... Rate=%d", bitrate);
   _HardSerial->begin(bitrate, SERIAL_8E1);
   if (onConnectCallback) {
