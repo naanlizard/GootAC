@@ -34,6 +34,19 @@ extern "C" {
 
 #include "config.h"
 
+#ifdef USE_FAKE_HEATPUMP
+#include "HeatPumpFake.h"
+// Override identity so the fake unit can never be confused with a production
+// device on the LAN. Also force HomeKit to start without waiting for a CN105
+// handshake (the fake has no UART peer).
+#undef DEVICE_NAME
+#define DEVICE_NAME "FakeDiag"
+#undef FW_VERSION
+#define FW_VERSION "0.0.1-fake"
+#undef FORCE_HK_START
+#define FORCE_HK_START true
+#endif
+
 ESP8266WebServer server(80);
 char hostName[32];
 char accessoryName[32];
@@ -161,6 +174,35 @@ void setup_webserver() {
     extern String ac_controller_get_json_status();
     server.send(200, "application/json", ac_controller_get_json_status());
   });
+
+#ifdef USE_FAKE_HEATPUMP
+  // Diagnostic-only endpoints. Inject simulated IR-remote / sensor changes
+  // so the controller's external-update path and HomeKit notifications can
+  // be exercised without a real Mitsubishi AC.
+  server.on("/fake/external", HTTP_GET, []() {
+    String power = server.hasArg("power") ? server.arg("power") : String("");
+    String mode  = server.hasArg("mode")  ? server.arg("mode")  : String("");
+    float temp   = server.hasArg("temp")  ? server.arg("temp").toFloat() : 0.0f;
+    gootac_fake_inject_external(
+        power.length() ? power.c_str() : nullptr,
+        mode.length() ? mode.c_str() : nullptr,
+        temp);
+    String body = String("{\"ok\":true,\"power\":\"") + power +
+                  "\",\"mode\":\"" + mode + "\",\"temp\":" + String(temp, 1) +
+                  "}";
+    server.send(200, "application/json", body);
+  });
+  server.on("/fake/temp", HTTP_GET, []() {
+    if (!server.hasArg("value")) {
+      server.send(400, "application/json", "{\"error\":\"missing value\"}");
+      return;
+    }
+    float v = server.arg("value").toFloat();
+    gootac_fake_force_room_temperature(v);
+    String body = String("{\"ok\":true,\"room_temp\":") + String(v, 2) + "}";
+    server.send(200, "application/json", body);
+  });
+#endif
 
   server.begin();
   GLOG_INFO("SYS", "Web server started on port 80");
