@@ -104,10 +104,16 @@ void load_target_state() {
       uint32_t check = calculate_checksum(&loaded);
       if (check == loaded.checksum) {
         currentState = loaded;
+        // Fan choice is intentionally not persisted: a reboot resets the
+        // fan to AUTO so a stale manual speed (e.g. accidental 1% drag)
+        // doesn't survive across a power cycle and silently cap cooling
+        // for the next session.
+        currentState.fan_mode = 1;
+        currentState.fan_speed = 0;
         char cBuf[10], hBuf[10];
         dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
         dtostrf(currentState.heating_threshold, 1, 1, hBuf);
-        GLOG_INFO("SYS", "Target State loaded successfully (Active: %d, Mode: %d, C: %s, H: %s)", 
+        GLOG_INFO("SYS", "Target State loaded successfully (Active: %d, Mode: %d, C: %s, H: %s)",
                   currentState.active, currentState.target_mode, cBuf, hBuf);
       } else {
         GLOG_WARN("SYS", "Target State Checksum Mismatch! Using default values.");
@@ -160,9 +166,25 @@ void set_ac_active(homekit_value_t value) {
 
 void set_ac_target_state(homekit_value_t value) {
   if (value.format != homekit_format_uint8) return;
+  uint8_t prev_mode = cha_ac_target_state.value.uint8_value;
   cha_ac_target_state.value = value;
   currentState.target_mode = value.uint8_value;
   HKLOG_INFO("Characteristic Set Target State -> %u", value.uint8_value);
+
+  // Mode change forces fan back to AUTO. Avoids surprising users whose
+  // last manual fan speed (e.g. QUIET from a quiet-night cooling run)
+  // would otherwise carry into the next heat/cool session.
+  if (value.uint8_value != prev_mode &&
+      (currentState.fan_mode != 1 || currentState.fan_speed != 0)) {
+    currentState.fan_mode = 1;
+    currentState.fan_speed = 0;
+    cha_ac_target_fan_state.value.uint8_value = 1;
+    cha_ac_rotation_speed.value.float_value = 0;
+    homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
+    homekit_characteristic_notify(&cha_ac_rotation_speed, cha_ac_rotation_speed.value);
+    GLOG_TRACE("HOMEKIT", "Mode change reset fan to AUTO");
+  }
+
   update_state("HomeKit Target State change");
 }
 
@@ -218,43 +240,45 @@ void set_ac_heating_threshold(homekit_value_t value) {
   update_state("HomeKit Heating Threshold change");
 }
 
+// Fan speed is always commanded as hardware AUTO. Any HomeKit write to
+// rotation_speed or target_fan_state is snapped back to AUTO and the
+// new value is notified so iOS Home immediately reflects the override.
+// Manual fan choice was removed because the AC's six discrete steps map
+// poorly onto a continuous slider — a stray 1% drag would pin the unit
+// to QUIET indefinitely. Identify is exempt (forces max in update_physical_ac).
 void set_ac_rotation_speed(homekit_value_t value) {
   if (value.format != homekit_format_float) return;
-  cha_ac_rotation_speed.value = value;
-  currentState.fan_speed = value.float_value;
-
-  if (value.float_value == 0) {
-    currentState.fan_mode = 1; // AUTO
-    if (cha_ac_target_fan_state.value.uint8_value != 1) {
-      cha_ac_target_fan_state.value.uint8_value = 1;
-      homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
-    }
-  } else {
-    currentState.fan_mode = 0; // MANUAL
-    if (cha_ac_target_fan_state.value.uint8_value != 0) {
-      cha_ac_target_fan_state.value.uint8_value = 0;
-      homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
-    }
+  float raw = value.float_value;
+  cha_ac_rotation_speed.value.float_value = 0.0f;
+  currentState.fan_speed = 0;
+  currentState.fan_mode = 1; // AUTO
+  if (raw != 0.0f) {
+    homekit_characteristic_notify(&cha_ac_rotation_speed, cha_ac_rotation_speed.value);
   }
-  char tempBuf[10];
-  dtostrf(value.float_value, 1, 1, tempBuf);
-  HKLOG_INFO("Characteristic Set Rotation Speed -> %s%%", tempBuf);
+  if (cha_ac_target_fan_state.value.uint8_value != 1) {
+    cha_ac_target_fan_state.value.uint8_value = 1;
+    homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
+  }
+  char rawBuf[10];
+  dtostrf(raw, 1, 1, rawBuf);
+  HKLOG_INFO("Characteristic Set Rotation Speed -> AUTO (raw %s%% snapped)", rawBuf);
   update_state("HomeKit Fan Speed change");
 }
 
 void set_ac_target_fan_state(homekit_value_t value) {
   if (value.format != homekit_format_uint8) return;
-  cha_ac_target_fan_state.value = value;
-  currentState.fan_mode = (value.uint8_value == 1) ? 1 : 0;
-
-  if (value.uint8_value == 1) { // Auto
-    if (cha_ac_rotation_speed.value.float_value != 0) {
-      cha_ac_rotation_speed.value.float_value = 0;
-      currentState.fan_speed = 0;
-      homekit_characteristic_notify(&cha_ac_rotation_speed, cha_ac_rotation_speed.value);
-    }
+  uint8_t raw = value.uint8_value;
+  cha_ac_target_fan_state.value.uint8_value = 1; // AUTO
+  currentState.fan_mode = 1;
+  if (raw != 1) {
+    homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
   }
-  HKLOG_INFO("Characteristic Set Target Fan State -> %u (%s)", value.uint8_value, (value.uint8_value == 1) ? "AUTO" : "MANUAL");
+  if (cha_ac_rotation_speed.value.float_value != 0.0f) {
+    cha_ac_rotation_speed.value.float_value = 0.0f;
+    currentState.fan_speed = 0;
+    homekit_characteristic_notify(&cha_ac_rotation_speed, cha_ac_rotation_speed.value);
+  }
+  HKLOG_INFO("Characteristic Set Target Fan State -> AUTO (raw %u snapped)", raw);
   update_state("HomeKit Fan Mode change");
 }
 
@@ -401,15 +425,7 @@ void update_physical_ac() {
     hp->setFanSpeedIndex(5); // 4 (Max)
   } else {
     hp->setVaneIndex(currentState.swing_mode == 1 ? 6 : 0); // 6:SWING, 0:AUTO
-    if (currentState.fan_mode == 1) hp->setFanSpeedIndex(0); // AUTO
-    else {
-      int speed = (int)currentState.fan_speed;
-      if (speed <= 20) hp->setFanSpeedIndex(1); // QUIET
-      else if (speed <= 40) hp->setFanSpeedIndex(2); // 1
-      else if (speed <= 60) hp->setFanSpeedIndex(3); // 2
-      else if (speed <= 80) hp->setFanSpeedIndex(4); // 3
-      else hp->setFanSpeedIndex(5); // 4
-    }
+    hp->setFanSpeedIndex(0); // Always hardware AUTO (see set_ac_rotation_speed)
   }
 
   unsigned long now = millis();
