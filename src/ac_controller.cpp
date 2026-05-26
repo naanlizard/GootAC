@@ -643,11 +643,17 @@ String ac_controller_get_json_status() {
 
   if (hp && hp->isConnected()) {
     heatpumpSettings s = hp->getSettings();
+    heatpumpSettings w = hp->getWantedSettings();
     heatpumpStatus st = hp->getStatus();
     JsonObject hw = doc.createNestedObject("hardware_status");
     hw["power"] = s.power;
     hw["mode"] = s.mode;
     hw["temp"] = s.temperature;
+    // Last-received vs last-commanded fan setting. Lets you verify that
+    // the AC is configured for AUTO ("AUTO" string) rather than a manual
+    // step ("QUIET"/"1".."4") that could explain a stuck fan speed.
+    hw["current_fan"] = s.fan;
+    hw["wanted_fan"] = w.fan;
     hw["room"] = hp->getRoomTemperature();
     hw["operating"] = st.operating;
     // 0x06 p[3] is the indoor coil thermistor (RT12), encoded as
