@@ -29,8 +29,6 @@ homekit_characteristic_t cha_ac_target_state = HOMEKIT_CHARACTERISTIC_(TARGET_HE
 homekit_characteristic_t cha_ac_current_temp = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 22.0, .min_value = (float[]) {MIN_VALID_ROOM_TEMP_C}, .max_value = (float[]) {MAX_VALID_ROOM_TEMP_C});
 homekit_characteristic_t cha_ac_cooling_threshold = HOMEKIT_CHARACTERISTIC_(COOLING_THRESHOLD_TEMPERATURE, 24.0, .min_value = (float[]) {16}, .max_value = (float[]) {31});
 homekit_characteristic_t cha_ac_heating_threshold = HOMEKIT_CHARACTERISTIC_(HEATING_THRESHOLD_TEMPERATURE, 18.0, .min_value = (float[]) {16}, .max_value = (float[]) {31});
-homekit_characteristic_t cha_ac_target_fan_state = HOMEKIT_CHARACTERISTIC_(TARGET_FAN_STATE, 0);
-homekit_characteristic_t cha_ac_rotation_speed = HOMEKIT_CHARACTERISTIC_(ROTATION_SPEED, 0);
 homekit_characteristic_t cha_ac_swing_mode = HOMEKIT_CHARACTERISTIC_(SWING_MODE, 0);
 homekit_characteristic_t cha_ac_temp_display_units = HOMEKIT_CHARACTERISTIC_(TEMPERATURE_DISPLAY_UNITS, 0);
 // 0 = no fault, 1 = general fault. We set 1 when the AC reports it
@@ -71,8 +69,6 @@ homekit_accessory_t *accessories[] = {
             &cha_ac_cooling_threshold,
             &cha_ac_heating_threshold,
             &cha_ac_temp_display_units,
-            &cha_ac_rotation_speed,
-            &cha_ac_target_fan_state,
             &cha_ac_swing_mode,
             &cha_ac_status_fault,
             NULL
@@ -103,5 +99,7 @@ homekit_server_config_t config = {
     //   1 = up to v1.10 (HEATER_COOLER + HUMIDIFIER_DEHUMIDIFIER bare set)
     //   2 = v1.11 — added cha_ac_status_fault to HEATER_COOLER and
     //               cha_dehumidifier_current_humidity to HUMIDIFIER_DEHUMIDIFIER
-    .config_number = 2
+    //   3 = v1.13 — removed cha_ac_rotation_speed + cha_ac_target_fan_state
+    //               from HEATER_COOLER (fan permanently delegated to AC AUTO)
+    .config_number = 3
 };

@@ -21,8 +21,6 @@ extern homekit_characteristic_t cha_ac_target_state;
 extern homekit_characteristic_t cha_ac_current_temp;
 extern homekit_characteristic_t cha_ac_cooling_threshold;
 extern homekit_characteristic_t cha_ac_heating_threshold;
-extern homekit_characteristic_t cha_ac_target_fan_state;
-extern homekit_characteristic_t cha_ac_rotation_speed;
 extern homekit_characteristic_t cha_ac_swing_mode;
 // Status Fault — set non-zero when the AC reports it can't comply (e.g.
 // multi-zone direction conflict, bit 3 of 0x09 status flags).

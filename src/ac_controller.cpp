@@ -81,48 +81,88 @@ void save_target_state() {
   }
 }
 
+static void apply_default_target_state() {
+  currentState.active = 0;
+  currentState.target_mode = 0; // AUTO
+  currentState.cooling_threshold = 28.0;
+  currentState.heating_threshold = 22.0;
+  currentState.swing_mode = 0;
+  currentState.dehumidifier = 0;
+}
+
+// Legacy on-disk layout from v1.11/v1.12 (before fan controls were removed
+// from HK). Kept here so v1.13 can migrate existing user-set thresholds
+// instead of silently reverting them to defaults on first boot.
+struct LegacyTargetStateV12 {
+  uint8_t active;
+  uint8_t target_mode;
+  float cooling_threshold;
+  float heating_threshold;
+  uint8_t fan_mode;
+  float fan_speed;
+  uint8_t swing_mode;
+  uint8_t dehumidifier;
+  uint32_t checksum;
+};
+
+static bool try_migrate_legacy_v12(File &f) {
+  if (f.size() != sizeof(LegacyTargetStateV12)) return false;
+  LegacyTargetStateV12 legacy;
+  f.seek(0);
+  if (f.readBytes((char *)&legacy, sizeof(legacy)) != sizeof(legacy)) return false;
+  if (legacy.cooling_threshold < 10.0f || legacy.cooling_threshold > 40.0f) return false;
+  if (legacy.heating_threshold < 10.0f || legacy.heating_threshold > 40.0f) return false;
+  currentState.active = legacy.active;
+  currentState.target_mode = legacy.target_mode;
+  currentState.cooling_threshold = legacy.cooling_threshold;
+  currentState.heating_threshold = legacy.heating_threshold;
+  currentState.swing_mode = legacy.swing_mode;
+  currentState.dehumidifier = legacy.dehumidifier;
+  char cBuf[10], hBuf[10];
+  dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
+  dtostrf(currentState.heating_threshold, 1, 1, hBuf);
+  GLOG_INFO("SYS", "Migrated v1.12 -> v1.13 target state (Active: %d, Mode: %d, C: %s, H: %s)",
+            currentState.active, currentState.target_mode, cBuf, hBuf);
+  save_target_state();
+  return true;
+}
+
 void load_target_state() {
   if (!LittleFS.exists(STATE_FILE)) {
     GLOG_INFO("SYS", "No state file found. Initializing fresh defaults.");
-    currentState.active = 0;
-    currentState.target_mode = 0; // AUTO
-    currentState.cooling_threshold = 28.0;
-    currentState.heating_threshold = 22.0;
-    currentState.fan_mode = 1; // AUTO
-    currentState.fan_speed = 0;
-    currentState.swing_mode = 0;
-    currentState.dehumidifier = 0;
+    apply_default_target_state();
     save_target_state();
-
     return;
   }
 
   File f = LittleFS.open(STATE_FILE, "r");
-  if (f) {
+  if (!f) return;
+
+  if (f.size() == sizeof(TargetState)) {
     TargetState loaded;
-    if (f.readBytes((char *)&loaded, sizeof(TargetState)) == sizeof(TargetState)) {
-      uint32_t check = calculate_checksum(&loaded);
-      if (check == loaded.checksum) {
-        currentState = loaded;
-        // Fan choice is intentionally not persisted: a reboot resets the
-        // fan to AUTO so a stale manual speed (e.g. accidental 1% drag)
-        // doesn't survive across a power cycle and silently cap cooling
-        // for the next session.
-        currentState.fan_mode = 1;
-        currentState.fan_speed = 0;
-        char cBuf[10], hBuf[10];
-        dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
-        dtostrf(currentState.heating_threshold, 1, 1, hBuf);
-        GLOG_INFO("SYS", "Target State loaded successfully (Active: %d, Mode: %d, C: %s, H: %s)",
-                  currentState.active, currentState.target_mode, cBuf, hBuf);
-      } else {
-        GLOG_WARN("SYS", "Target State Checksum Mismatch! Using default values.");
-      }
-    } else {
-      GLOG_ERROR("SYS", "Persistence Error: Read truncated Target State! Using defaults.");
+    size_t read = f.readBytes((char *)&loaded, sizeof(TargetState));
+    f.close();
+    if (read == sizeof(TargetState) && calculate_checksum(&loaded) == loaded.checksum) {
+      currentState = loaded;
+      char cBuf[10], hBuf[10];
+      dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
+      dtostrf(currentState.heating_threshold, 1, 1, hBuf);
+      GLOG_INFO("SYS", "Target State loaded successfully (Active: %d, Mode: %d, C: %s, H: %s)",
+                currentState.active, currentState.target_mode, cBuf, hBuf);
+      return;
     }
+    GLOG_WARN("SYS", "Target State checksum mismatch; applying defaults");
+  } else if (try_migrate_legacy_v12(f)) {
+    f.close();
+    return;
+  } else {
+    GLOG_WARN("SYS", "Target State size mismatch (got %u, expected %u); applying defaults",
+              (unsigned)f.size(), (unsigned)sizeof(TargetState));
     f.close();
   }
+
+  apply_default_target_state();
+  save_target_state();
 }
 
 static bool pending_update = false;
@@ -166,25 +206,9 @@ void set_ac_active(homekit_value_t value) {
 
 void set_ac_target_state(homekit_value_t value) {
   if (value.format != homekit_format_uint8) return;
-  uint8_t prev_mode = cha_ac_target_state.value.uint8_value;
   cha_ac_target_state.value = value;
   currentState.target_mode = value.uint8_value;
   HKLOG_INFO("Characteristic Set Target State -> %u", value.uint8_value);
-
-  // Mode change forces fan back to AUTO. Avoids surprising users whose
-  // last manual fan speed (e.g. QUIET from a quiet-night cooling run)
-  // would otherwise carry into the next heat/cool session.
-  if (value.uint8_value != prev_mode &&
-      (currentState.fan_mode != 1 || currentState.fan_speed != 0)) {
-    currentState.fan_mode = 1;
-    currentState.fan_speed = 0;
-    cha_ac_target_fan_state.value.uint8_value = 1;
-    cha_ac_rotation_speed.value.float_value = 0;
-    homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
-    homekit_characteristic_notify(&cha_ac_rotation_speed, cha_ac_rotation_speed.value);
-    GLOG_TRACE("HOMEKIT", "Mode change reset fan to AUTO");
-  }
-
   update_state("HomeKit Target State change");
 }
 
@@ -240,48 +264,6 @@ void set_ac_heating_threshold(homekit_value_t value) {
   update_state("HomeKit Heating Threshold change");
 }
 
-// Fan speed is always commanded as hardware AUTO. Any HomeKit write to
-// rotation_speed or target_fan_state is snapped back to AUTO and the
-// new value is notified so iOS Home immediately reflects the override.
-// Manual fan choice was removed because the AC's six discrete steps map
-// poorly onto a continuous slider — a stray 1% drag would pin the unit
-// to QUIET indefinitely. Identify is exempt (forces max in update_physical_ac).
-void set_ac_rotation_speed(homekit_value_t value) {
-  if (value.format != homekit_format_float) return;
-  float raw = value.float_value;
-  cha_ac_rotation_speed.value.float_value = 0.0f;
-  currentState.fan_speed = 0;
-  currentState.fan_mode = 1; // AUTO
-  if (raw != 0.0f) {
-    homekit_characteristic_notify(&cha_ac_rotation_speed, cha_ac_rotation_speed.value);
-  }
-  if (cha_ac_target_fan_state.value.uint8_value != 1) {
-    cha_ac_target_fan_state.value.uint8_value = 1;
-    homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
-  }
-  char rawBuf[10];
-  dtostrf(raw, 1, 1, rawBuf);
-  HKLOG_INFO("Characteristic Set Rotation Speed -> AUTO (raw %s%% snapped)", rawBuf);
-  update_state("HomeKit Fan Speed change");
-}
-
-void set_ac_target_fan_state(homekit_value_t value) {
-  if (value.format != homekit_format_uint8) return;
-  uint8_t raw = value.uint8_value;
-  cha_ac_target_fan_state.value.uint8_value = 1; // AUTO
-  currentState.fan_mode = 1;
-  if (raw != 1) {
-    homekit_characteristic_notify(&cha_ac_target_fan_state, cha_ac_target_fan_state.value);
-  }
-  if (cha_ac_rotation_speed.value.float_value != 0.0f) {
-    cha_ac_rotation_speed.value.float_value = 0.0f;
-    currentState.fan_speed = 0;
-    homekit_characteristic_notify(&cha_ac_rotation_speed, cha_ac_rotation_speed.value);
-  }
-  HKLOG_INFO("Characteristic Set Target Fan State -> AUTO (raw %u snapped)", raw);
-  update_state("HomeKit Fan Mode change");
-}
-
 void set_ac_swing_mode(homekit_value_t value) {
   if (value.format != homekit_format_uint8) return;
   cha_ac_swing_mode.value = value;
@@ -326,8 +308,6 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
   cha_ac_target_state.value.uint8_value = currentState.target_mode;
   cha_ac_cooling_threshold.value.float_value = currentState.cooling_threshold;
   cha_ac_heating_threshold.value.float_value = currentState.heating_threshold;
-  cha_ac_target_fan_state.value.uint8_value = currentState.fan_mode;
-  cha_ac_rotation_speed.value.float_value = currentState.fan_speed;
   cha_ac_swing_mode.value.uint8_value = currentState.swing_mode;
   cha_dehumidifier_active.value.uint8_value = currentState.dehumidifier;
 
@@ -335,8 +315,6 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
   cha_ac_target_state.setter = set_ac_target_state;
   cha_ac_cooling_threshold.setter = set_ac_cooling_threshold;
   cha_ac_heating_threshold.setter = set_ac_heating_threshold;
-  cha_ac_target_fan_state.setter = set_ac_target_fan_state;
-  cha_ac_rotation_speed.setter = set_ac_rotation_speed;
   cha_ac_swing_mode.setter = set_ac_swing_mode;
   cha_dehumidifier_active.setter = set_dehumidifier_active;
 
@@ -425,7 +403,10 @@ void update_physical_ac() {
     hp->setFanSpeedIndex(5); // 4 (Max)
   } else {
     hp->setVaneIndex(currentState.swing_mode == 1 ? 6 : 0); // 6:SWING, 0:AUTO
-    hp->setFanSpeedIndex(0); // Always hardware AUTO (see set_ac_rotation_speed)
+    // Fan speed is permanently delegated to the AC's own AUTO algorithm.
+    // The HK rotation_speed / target_fan_state characteristics were
+    // removed from the accessory database in v1.13 (see homekit_ac.c).
+    hp->setFanSpeedIndex(0);
   }
 
   unsigned long now = millis();
@@ -658,15 +639,7 @@ String ac_controller_get_json_status() {
   internal["mode"] = currentState.target_mode;
   internal["heat_thr"] = currentState.heating_threshold;
   internal["cool_thr"] = currentState.cooling_threshold;
-  // Fan: mode is 0=MANUAL, 1=AUTO; speed is 0-100 (HK rotation_speed).
-  // When mode==AUTO speed must be 0; when mode==MANUAL speed must be >0.
-  // The two are kept consistent by set_ac_rotation_speed and
-  // set_ac_target_fan_state.
-  internal["fan_mode"] = currentState.fan_mode;
-  internal["fan_speed"] = currentState.fan_speed;
   internal["swing_mode"] = currentState.swing_mode;
-  internal["hk_target_fan_state"] = cha_ac_target_fan_state.value.uint8_value;
-  internal["hk_rotation_speed"] = cha_ac_rotation_speed.value.float_value;
 
   if (hp && hp->isConnected()) {
     heatpumpSettings s = hp->getSettings();

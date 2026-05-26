@@ -6,12 +6,9 @@ struct TargetState {
     uint8_t target_mode;         // 0: COOL, 1: HEAT, 2: AUTO
     float cooling_threshold;
     float heating_threshold;
-    uint8_t fan_mode;            // 0: MANUAL, 1: AUTO
-    float fan_speed;             // 0-100%
     uint8_t swing_mode;          // 0: OFF, 1: SWING
     uint8_t dehumidifier;        // 0: OFF, 1: ON
     uint32_t checksum;           // Integrity check
-
 };
 
 // --- Logging Macros ---

@@ -9,7 +9,7 @@
 // DEVICE_NAME: Human-readable name for this unit (e.g., "Bedroom", "Suite")
 // Firmware derives: hostname "GootAC-Bedroom", accessory name "Bedroom AC"
 #define DEVICE_NAME    "Bedroom"
-#define FW_VERSION     "1.12"
+#define FW_VERSION     "1.13"
 
 // --- System Behavior ---
 // FORCE_HK_START: If true, the HomeKit server will initialize immediately
