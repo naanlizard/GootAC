@@ -642,6 +642,15 @@ String ac_controller_get_json_status() {
   internal["mode"] = currentState.target_mode;
   internal["heat_thr"] = currentState.heating_threshold;
   internal["cool_thr"] = currentState.cooling_threshold;
+  // Fan: mode is 0=MANUAL, 1=AUTO; speed is 0-100 (HK rotation_speed).
+  // When mode==AUTO speed must be 0; when mode==MANUAL speed must be >0.
+  // The two are kept consistent by set_ac_rotation_speed and
+  // set_ac_target_fan_state.
+  internal["fan_mode"] = currentState.fan_mode;
+  internal["fan_speed"] = currentState.fan_speed;
+  internal["swing_mode"] = currentState.swing_mode;
+  internal["hk_target_fan_state"] = cha_ac_target_fan_state.value.uint8_value;
+  internal["hk_rotation_speed"] = cha_ac_rotation_speed.value.float_value;
 
   if (hp && hp->isConnected()) {
     heatpumpSettings s = hp->getSettings();
