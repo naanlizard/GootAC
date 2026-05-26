@@ -33,11 +33,21 @@ homekit_characteristic_t cha_ac_target_fan_state = HOMEKIT_CHARACTERISTIC_(TARGE
 homekit_characteristic_t cha_ac_rotation_speed = HOMEKIT_CHARACTERISTIC_(ROTATION_SPEED, 0);
 homekit_characteristic_t cha_ac_swing_mode = HOMEKIT_CHARACTERISTIC_(SWING_MODE, 0);
 homekit_characteristic_t cha_ac_temp_display_units = HOMEKIT_CHARACTERISTIC_(TEMPERATURE_DISPLAY_UNITS, 0);
+// 0 = no fault, 1 = general fault. We set 1 when the AC reports it
+// cannot comply with the requested mode (multi-zone direction conflict
+// = bit 3 of 0x09 status flags). iOS Home shows a warning badge.
+homekit_characteristic_t cha_ac_status_fault = HOMEKIT_CHARACTERISTIC_(STATUS_FAULT, 0);
 
 // Dehumidifier Service
 homekit_characteristic_t cha_dehumidifier_active = HOMEKIT_CHARACTERISTIC_(ACTIVE, 0);
 homekit_characteristic_t cha_dehumidifier_current_state = HOMEKIT_CHARACTERISTIC_(CURRENT_HUMIDIFIER_DEHUMIDIFIER_STATE, 0);
 homekit_characteristic_t cha_dehumidifier_target_state = HOMEKIT_CHARACTERISTIC_(TARGET_HUMIDIFIER_DEHUMIDIFIER_STATE, 2, .valid_values = { .count = 1, .values = (uint8_t[]) {2} });
+// HAP-required characteristic for the HUMIDIFIER_DEHUMIDIFIER service.
+// CN105 does not expose an indoor humidity reading on this hardware
+// (confirmed by exhaustive sweep + Mitsubishi's licensed Modbus
+// gateway publishing no humidity register). Fixed 50% stub satisfies
+// the spec so iOS Home stops reporting "No Response" for the tile.
+homekit_characteristic_t cha_dehumidifier_current_humidity = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 50.0);
 
 // Build the Accessory Database
 homekit_accessory_t *accessories[] = {
@@ -64,6 +74,7 @@ homekit_accessory_t *accessories[] = {
             &cha_ac_rotation_speed,
             &cha_ac_target_fan_state,
             &cha_ac_swing_mode,
+            &cha_ac_status_fault,
             NULL
         }),
         HOMEKIT_SERVICE(HUMIDIFIER_DEHUMIDIFIER, .characteristics = (homekit_characteristic_t*[]) {
@@ -72,6 +83,7 @@ homekit_accessory_t *accessories[] = {
             &cha_dehumidifier_active,
             &cha_dehumidifier_current_state,
             &cha_dehumidifier_target_state,
+            &cha_dehumidifier_current_humidity,
             NULL
         }),
         NULL
@@ -81,5 +93,15 @@ homekit_accessory_t *accessories[] = {
 
 homekit_server_config_t config = {
     .accessories = accessories,
-    .password = "111-22-333"
+    .password = "111-22-333",
+    // Bump every time the accessory database changes (services/characteristics
+    // added or removed). iOS Home compares this number against what it has
+    // cached for the paired accessory; if higher, it re-reads /accessories
+    // and picks up the new schema. Pairings survive the bump.
+    //
+    // History:
+    //   1 = up to v1.10 (HEATER_COOLER + HUMIDIFIER_DEHUMIDIFIER bare set)
+    //   2 = v1.11 — added cha_ac_status_fault to HEATER_COOLER and
+    //               cha_dehumidifier_current_humidity to HUMIDIFIER_DEHUMIDIFIER
+    .config_number = 2
 };

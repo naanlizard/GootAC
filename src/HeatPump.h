@@ -90,8 +90,31 @@ struct heatpumpStatus {
   bool operating; // if true, the heatpump is operating to reach the desired
                   // temperature
   heatpumpTimers timers;
+  // Historical name kept for ABI; this byte is actually the indoor coil
+  // thermistor (RT12) reading, encoded as `°C = byte + 10`.
+  // See docs/byte_resolution_2026-05-26.md in CN105Sniffer for the
+  // evidence chain (matches OBH683E p.12 "compressor frequency is
+  // controlled by the temperature of the indoor heat exchanger", echavet
+  // issue #482, and the population-level Freq distributions observed
+  // across this fleet 2026-05-26).
   int compressorFrequency;
+  // Status flags decoded from info-type 0x09 byte 3 (muart-group spec).
+  // bit 0 filter, bit 1 defrost, bit 2 preheat, bit 3 standby/blocked.
+  uint8_t statusFlags;
+  // Actual fan speed reported by the AC (may differ from requested fan).
+  // Kumo UI mapping: 0=Off, 1=VeryLow, 2=Quiet, 3=Low, 4=Powerful,
+  // 5=SuperPowerful, 6=SuperQuiet.
+  uint8_t actualFanSpeed;
+  // Auto sub-mode (low nibble) + leader bit 0x40. Low nibble values:
+  // 0=Direct, 1=AutoFan, 2=AutoHeat, 3=AutoCool.
+  uint8_t autoSubMode;
 };
+
+// Bit positions in heatpumpStatus.statusFlags.
+constexpr uint8_t HP_STATUS_FILTER_DIRTY    = 0x01;
+constexpr uint8_t HP_STATUS_DEFROST         = 0x02;
+constexpr uint8_t HP_STATUS_PREHEAT         = 0x04;
+constexpr uint8_t HP_STATUS_BLOCKED_BY_OTHER = 0x08;
 
 class HeatPump {
 private:
@@ -110,12 +133,14 @@ private:
   static const int INFOHEADER_LEN = 5;
   const byte INFOHEADER[INFOHEADER_LEN] = {0xfc, 0x42, 0x01, 0x30, 0x10};
 
-  static const int INFOMODE_LEN = 4;
+  static const int INFOMODE_LEN = 5;
   const byte INFOMODE[INFOMODE_LEN] = {
       0x02, // request a settings packet - RQST_PKT_SETTINGS
       0x03, // request the current room temp - RQST_PKT_ROOM_TEMP
       0x05, // request the timers - RQST_PKT_TIMERS
       0x06, // request status - RQST_PKT_STATUS
+      0x09, // request run state - RQST_PKT_RUN_STATE (status flags, actual
+            // fan speed, auto sub-mode)
   };
 
   const int RCVD_PKT_FAIL = 0;

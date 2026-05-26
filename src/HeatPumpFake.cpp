@@ -54,6 +54,9 @@ HeatPump::HeatPump() {
   currentStatus.timers.offMinutesSet = 0;
   currentStatus.timers.offMinutesRemaining = 0;
   currentStatus.compressorFrequency = 0;
+  currentStatus.statusFlags = 0;
+  currentStatus.actualFanSpeed = 0;
+  currentStatus.autoSubMode = 0;
 
   _HardSerial = nullptr;
   lastSend = 0;

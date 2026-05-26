@@ -74,7 +74,10 @@ HeatPump::HeatPump() {
       0.0,                             // outsideAirTemperature
       false,                           // operating
       {TIMER_MODE_MAP[0], 0, 0, 0, 0}, // timers
-      0                                // compressorFrequency
+      0,                               // compressorFrequency (= indoor coil temp byte)
+      0,                               // statusFlags
+      0,                               // actualFanSpeed
+      0                                // autoSubMode
   };
 
   // Initialise settings with safe defaults to prevent NULL pointer crashes
@@ -885,7 +888,7 @@ int HeatPump::readPacket() {
             return RCVD_PKT_TIMER;
           }
 
-          case 0x06: { // status
+          case 0x06: { // status (+ indoor coil temp at data[3] — see HeatPump.h)
             heatpumpStatus receivedStatus;
             receivedStatus.operating = data[4];
             receivedStatus.compressorFrequency = data[3];
@@ -896,9 +899,16 @@ int HeatPump::readPacket() {
                  currentStatus.compressorFrequency !=
                      receivedStatus.compressorFrequency)) {
 
-              GLOG_INFO("MITSUBISHI", "RECV: Status Change (Op=%d, Freq=%d)",
-                        receivedStatus.operating,
-                        receivedStatus.compressorFrequency);
+              // The Freq label is historical; this byte is indoor coil
+              // temp encoded as `°C = byte + 10`. Logged as both to keep
+              // existing log parsers working while making the real
+              // semantic visible.
+              GLOG_INFO(
+                  "MITSUBISHI",
+                  "RECV: Status Change (Op=%d, CoilByte=%d ~%dC)",
+                  receivedStatus.operating,
+                  receivedStatus.compressorFrequency,
+                  receivedStatus.compressorFrequency + 10);
 
               currentStatus.operating = receivedStatus.operating;
               currentStatus.compressorFrequency =
@@ -909,6 +919,51 @@ int HeatPump::readPacket() {
               currentStatus.operating = receivedStatus.operating;
               currentStatus.compressorFrequency =
                   receivedStatus.compressorFrequency;
+            }
+
+            return RCVD_PKT_STATUS;
+          }
+
+          case 0x09: { // run state — status flags, actual fan, auto sub-mode
+            // Per muart-group's CN105 documentation:
+            //   data[3] = status flags bitmask
+            //     bit 0 = filter dirty
+            //     bit 1 = defrost active
+            //     bit 2 = preheat ("HotAdjust")
+            //     bit 3 = standby ("another unit with priority is requesting
+            //             a conflicting mode") — multi-zone direction conflict
+            //   data[4] = actual fan speed (0..6, Kumo UI scale)
+            //   data[5] = auto sub-mode (low nibble) + leader flag (high bit)
+            uint8_t newFlags = data[3];
+            uint8_t newFan = data[4];
+            uint8_t newAuto = data[5];
+
+            bool flagsChanged = (currentStatus.statusFlags != newFlags);
+            bool fanChanged = (currentStatus.actualFanSpeed != newFan);
+            bool autoChanged = (currentStatus.autoSubMode != newAuto);
+
+            currentStatus.statusFlags = newFlags;
+            currentStatus.actualFanSpeed = newFan;
+            currentStatus.autoSubMode = newAuto;
+
+            if (flagsChanged || fanChanged || autoChanged) {
+              if (flagsChanged) {
+                // ArduinoLog has no %02X — snprintf to a buffer + %s.
+                char hex[3];
+                snprintf(hex, sizeof(hex), "%02X", newFlags);
+                GLOG_INFO(
+                    "MITSUBISHI",
+                    "RECV: RunState flags=0x%s (filter=%d defrost=%d "
+                    "preheat=%d blocked=%d)",
+                    hex,
+                    (newFlags & HP_STATUS_FILTER_DIRTY) ? 1 : 0,
+                    (newFlags & HP_STATUS_DEFROST) ? 1 : 0,
+                    (newFlags & HP_STATUS_PREHEAT) ? 1 : 0,
+                    (newFlags & HP_STATUS_BLOCKED_BY_OTHER) ? 1 : 0);
+              }
+              if (statusChangedCallback) {
+                statusChangedCallback(currentStatus);
+              }
             }
 
             return RCVD_PKT_STATUS;

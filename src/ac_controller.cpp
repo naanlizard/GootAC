@@ -562,15 +562,53 @@ void ac_controller_sync_from_ac() {
   }
 
   // 4. Update Dehumidifier Current State (0:Inactive, 1:Idle, 3:Dehumidifying)
-  uint8_t dehum_state = 0;
+  //
+  // "Dehumidifying" is reported when (a) the dehumidifier service is
+  // active, (b) the AC is in DRY mode, and (c) the indoor coil is
+  // running cold (causing condensation). The coil-temp threshold comes
+  // from byte (compressorFrequency + 10) °C: <= 18°C means the coil is
+  // pulling water out of the air. See docs/byte_resolution_2026-05-26.md
+  // in the CN105Sniffer repo for the evidence chain.
+  uint8_t dehum_state = 0; // 0 = Inactive (service off)
   if (cha_dehumidifier_active.value.uint8_value == 1) {
     bool physOn = (strcmp(s.power, "ON") == 0);
-    dehum_state = (physOn && strcmp(s.mode, "DRY") == 0) ? 3 : 1;
+    bool inDry  = (strcmp(s.mode, "DRY") == 0);
+    int coilByte = hp->getStatus().compressorFrequency;
+    // Coil "actively cold" = byte 1..8 → ~11..18°C. Byte = 0 means the
+    // probe is reporting the floor / not contributing, which we treat
+    // as "not actively dehumidifying" — DRY just started, coil hasn't
+    // condensed yet, or the unit is in HEAT/standby.
+    bool coilCold = (coilByte >= 1) && (coilByte <= 8);
+    if (physOn && inDry && coilCold) {
+      dehum_state = 3; // Dehumidifying
+    } else {
+      dehum_state = 1; // Idle (service is on but not actively pulling moisture)
+    }
   }
   if (cha_dehumidifier_current_state.value.uint8_value != dehum_state) {
     cha_dehumidifier_current_state.value.uint8_value = dehum_state;
     homekit_characteristic_notify(&cha_dehumidifier_current_state,
                                   cha_dehumidifier_current_state.value);
+  }
+
+  // 5. Update StatusFault on the HeaterCooler service. The AC raises
+  // bit 3 of 0x09 status flags when another indoor unit on the same
+  // outdoor compressor has requested a conflicting thermal direction
+  // (e.g. this unit is set to HEAT while a sibling is in COOL). The
+  // indoor unit blinks its red LED in this state. We surface it to
+  // HomeKit as a fault so the user sees a warning badge on the tile
+  // instead of silent non-response.
+  uint8_t fault = (hp->getStatus().statusFlags & HP_STATUS_BLOCKED_BY_OTHER) ? 1 : 0;
+  if (cha_ac_status_fault.value.uint8_value != fault) {
+    cha_ac_status_fault.value.uint8_value = fault;
+    homekit_characteristic_notify(&cha_ac_status_fault,
+                                  cha_ac_status_fault.value);
+    if (fault) {
+      GLOG_INFO("MITSUBISHI",
+                "StatusFault: blocked by other unit (multi-zone conflict)");
+    } else {
+      GLOG_INFO("MITSUBISHI", "StatusFault: cleared");
+    }
   }
 }
 
@@ -607,11 +645,29 @@ String ac_controller_get_json_status() {
 
   if (hp && hp->isConnected()) {
     heatpumpSettings s = hp->getSettings();
+    heatpumpStatus st = hp->getStatus();
     JsonObject hw = doc.createNestedObject("hardware_status");
     hw["power"] = s.power;
     hw["mode"] = s.mode;
     hw["temp"] = s.temperature;
     hw["room"] = hp->getRoomTemperature();
+    hw["operating"] = st.operating;
+    // 0x06 p[3] is the indoor coil thermistor (RT12), encoded as
+    // `°C = byte + 10` — see docs/byte_resolution_2026-05-26.md in the
+    // CN105Sniffer repo. Value 0 means probe inactive (coil floor or
+    // HEAT mode where this probe isn't the controller); report only
+    // when nonzero.
+    if (st.compressorFrequency > 0) {
+      hw["indoor_coil_c"] = st.compressorFrequency + 10;
+    }
+    // 0x09 status flags (bitmask). Surfaced individually for clarity.
+    hw["filter_dirty"]      = (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0;
+    hw["defrost_active"]    = (st.statusFlags & HP_STATUS_DEFROST) != 0;
+    hw["preheat_active"]    = (st.statusFlags & HP_STATUS_PREHEAT) != 0;
+    hw["blocked_by_other"]  = (st.statusFlags & HP_STATUS_BLOCKED_BY_OTHER) != 0;
+    hw["actual_fan_speed"]  = st.actualFanSpeed;
+    hw["auto_sub_mode"]     = st.autoSubMode & 0x0F;
+    hw["auto_leader"]       = (st.autoSubMode & 0x40) != 0;
   }
 
   JsonObject diag = doc.createNestedObject("diag");
