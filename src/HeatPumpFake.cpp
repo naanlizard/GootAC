@@ -53,7 +53,7 @@ HeatPump::HeatPump() {
   currentStatus.timers.onMinutesRemaining = 0;
   currentStatus.timers.offMinutesSet = 0;
   currentStatus.timers.offMinutesRemaining = 0;
-  currentStatus.compressorFrequency = 0;
+  currentStatus.statusByte3 = 0;
   currentStatus.statusFlags = 0;
   currentStatus.actualFanSpeed = 0;
   currentStatus.autoSubMode = 0;

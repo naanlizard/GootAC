@@ -558,29 +558,16 @@ void ac_controller_sync_from_ac() {
                                   cha_ac_current_state.value);
   }
 
-  // 4. Update Dehumidifier Current State (0:Inactive, 1:Idle, 3:Dehumidifying)
-  //
-  // "Dehumidifying" is reported when (a) the dehumidifier service is
-  // active, (b) the AC is in DRY mode, and (c) the indoor coil is
-  // running cold (causing condensation). The coil-temp threshold comes
-  // from byte (compressorFrequency + 10) °C: <= 18°C means the coil is
-  // pulling water out of the air. See docs/byte_resolution_2026-05-26.md
-  // in the CN105Sniffer repo for the evidence chain.
+  // 4. Update Dehumidifier Current State (0:Inactive, 1:Idle, 3:Dehumidifying).
+  // Report Dehumidifying whenever the service is active and the AC is
+  // in DRY mode with power on. The earlier "coil cold = byte 1..8"
+  // predicate was based on a wrong interpretation of statusByte3 as a
+  // coil temperature, and has been removed.
   uint8_t dehum_state = 0; // 0 = Inactive (service off)
   if (cha_dehumidifier_active.value.uint8_value == 1) {
     bool physOn = (strcmp(s.power, "ON") == 0);
     bool inDry  = (strcmp(s.mode, "DRY") == 0);
-    int coilByte = hp->getStatus().compressorFrequency;
-    // Coil "actively cold" = byte 1..8 → ~11..18°C. Byte = 0 means the
-    // probe is reporting the floor / not contributing, which we treat
-    // as "not actively dehumidifying" — DRY just started, coil hasn't
-    // condensed yet, or the unit is in HEAT/standby.
-    bool coilCold = (coilByte >= 1) && (coilByte <= 8);
-    if (physOn && inDry && coilCold) {
-      dehum_state = 3; // Dehumidifying
-    } else {
-      dehum_state = 1; // Idle (service is on but not actively pulling moisture)
-    }
+    dehum_state = (physOn && inDry) ? 3 : 1;
   }
   if (cha_dehumidifier_current_state.value.uint8_value != dehum_state) {
     cha_dehumidifier_current_state.value.uint8_value = dehum_state;
@@ -656,14 +643,11 @@ String ac_controller_get_json_status() {
     hw["wanted_fan"] = w.fan;
     hw["room"] = hp->getRoomTemperature();
     hw["operating"] = st.operating;
-    // 0x06 p[3] is the indoor coil thermistor (RT12), encoded as
-    // `°C = byte + 10` — see docs/byte_resolution_2026-05-26.md in the
-    // CN105Sniffer repo. Value 0 means probe inactive (coil floor or
-    // HEAT mode where this probe isn't the controller); report only
-    // when nonzero.
-    if (st.compressorFrequency > 0) {
-      hw["indoor_coil_c"] = st.compressorFrequency + 10;
-    }
+    // Raw byte 3 of the 0x06 status packet. Semantic unverified — see
+    // heatpumpStatus::statusByte3 comment in HeatPump.h. Reported without
+    // unit or transform; previous "indoor_coil_c = byte + 10" field was
+    // based on a wrong interpretation and has been removed.
+    hw["status_byte3"] = st.statusByte3;
     // 0x09 status flags (bitmask). Surfaced individually for clarity.
     hw["filter_dirty"]      = (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0;
     hw["defrost_active"]    = (st.statusFlags & HP_STATUS_DEFROST) != 0;

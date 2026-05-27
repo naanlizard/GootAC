@@ -74,7 +74,7 @@ HeatPump::HeatPump() {
       0.0,                             // outsideAirTemperature
       false,                           // operating
       {TIMER_MODE_MAP[0], 0, 0, 0, 0}, // timers
-      0,                               // compressorFrequency (= indoor coil temp byte)
+      0,                               // statusByte3 (raw byte 3 of 0x06 status packet; see HeatPump.h)
       0,                               // statusFlags
       0,                               // actualFanSpeed
       0                                // autoSubMode
@@ -888,37 +888,38 @@ int HeatPump::readPacket() {
             return RCVD_PKT_TIMER;
           }
 
-          case 0x06: { // status (+ indoor coil temp at data[3] — see HeatPump.h)
+          case 0x06: { // status; data[3] = unknown system-wide byte (see HeatPump.h)
             heatpumpStatus receivedStatus;
             receivedStatus.operating = data[4];
-            receivedStatus.compressorFrequency = data[3];
+            receivedStatus.statusByte3 = data[3];
 
             // callback for status change
             if (statusChangedCallback &&
                 (currentStatus.operating != receivedStatus.operating ||
-                 currentStatus.compressorFrequency !=
-                     receivedStatus.compressorFrequency)) {
+                 currentStatus.statusByte3 !=
+                     receivedStatus.statusByte3)) {
 
-              // The Freq label is historical; this byte is indoor coil
-              // temp encoded as `°C = byte + 10`. Logged as both to keep
-              // existing log parsers working while making the real
-              // semantic visible.
+              // Log the raw byte without interpretation. SwiCago labels
+              // this field "compressorFrequency"; we renamed it to
+              // statusByte3 because the actual semantic is unverified.
+              // Observed: moves in lockstep across all 4 indoor units
+              // (system-wide outdoor signal), but the units (Hz / °C /
+              // other) are unverified. Don't claim it's a temperature.
               GLOG_INFO(
                   "MITSUBISHI",
-                  "RECV: Status Change (Op=%d, CoilByte=%d ~%dC)",
+                  "RECV: Status Change (Op=%d, byte3=%d)",
                   receivedStatus.operating,
-                  receivedStatus.compressorFrequency,
-                  receivedStatus.compressorFrequency + 10);
+                  receivedStatus.statusByte3);
 
               currentStatus.operating = receivedStatus.operating;
-              currentStatus.compressorFrequency =
-                  receivedStatus.compressorFrequency;
+              currentStatus.statusByte3 =
+                  receivedStatus.statusByte3;
 
               statusChangedCallback(currentStatus);
             } else {
               currentStatus.operating = receivedStatus.operating;
-              currentStatus.compressorFrequency =
-                  receivedStatus.compressorFrequency;
+              currentStatus.statusByte3 =
+                  receivedStatus.statusByte3;
             }
 
             return RCVD_PKT_STATUS;

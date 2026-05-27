@@ -90,14 +90,18 @@ struct heatpumpStatus {
   bool operating; // if true, the heatpump is operating to reach the desired
                   // temperature
   heatpumpTimers timers;
-  // Historical name kept for ABI; this byte is actually the indoor coil
-  // thermistor (RT12) reading, encoded as `°C = byte + 10`.
-  // See docs/byte_resolution_2026-05-26.md in CN105Sniffer for the
-  // evidence chain (matches OBH683E p.12 "compressor frequency is
-  // controlled by the temperature of the indoor heat exchanger", echavet
-  // issue #482, and the population-level Freq distributions observed
-  // across this fleet 2026-05-26).
-  int compressorFrequency;
+  // Raw byte 3 of the 0x06 status packet. Semantic unverified.
+  // SwiCago's library calls this "compressorFrequency"; we have renamed
+  // it to avoid asserting an interpretation. What we know from observation:
+  // the value moves in lockstep across all 4 indoor units on the same
+  // outdoor unit (97% of 30s-aligned windows show all 4 within ±3, 67%
+  // exact match), ruling out a per-indoor-unit signal like an individual
+  // coil thermistor. It is therefore some system-wide outdoor telemetry
+  // — compressor frequency (Hz), outdoor coil temperature, or other
+  // discharge/condenser signal. Observed fleet range: 0–67.
+  // Do NOT treat as °C — earlier "byte + 10" temperature interpretation
+  // was wrong and has been retracted from logs and /status.
+  int statusByte3;
   // Status flags decoded from info-type 0x09 byte 3 (muart-group spec).
   // bit 0 filter, bit 1 defrost, bit 2 preheat, bit 3 standby/blocked.
   uint8_t statusFlags;
