@@ -634,6 +634,19 @@ static void m_i(Print& o, const __FlashStringHelper* n, int32_t v) {
 static void m_b(Print& o, const __FlashStringHelper* n, bool v) {
   m_type(o, n); o.print(n); o.print(' '); o.print(v ? '1' : '0'); o.print('\n');
 }
+static void m_f(Print& o, const __FlashStringHelper* n, float v) {
+  char b[16]; dtostrf(v, 1, 1, b); // 1 decimal — 0.1C room-sensor resolution
+  m_type(o, n); o.print(n); o.print(' '); o.print(b); o.print('\n');
+}
+// currentState.target_mode: 0=COOL, 1=HEAT, 2=AUTO (see ac_controller.h).
+static const __FlashStringHelper* target_mode_str(uint8_t m) {
+  switch (m) {
+    case 0:  return F("COOL");
+    case 1:  return F("HEAT");
+    case 2:  return F("AUTO");
+    default: return F("UNKNOWN");
+  }
+}
 
 void ac_controller_write_metrics(Print& out) {
   // --- Identity ---
@@ -658,5 +671,34 @@ void ac_controller_write_metrics(Print& out) {
   m_b(out, F("gootac_homekit_paired"),  hk ? hk->paired : false);
   m_u(out, F("gootac_homekit_clients"), hk ? (uint32_t)hk->nfds : 0);
 
-  // --- AC / heatpump block: added in Task 2 ---
+  // --- AC / heatpump (guarded; gootac_ac_connected always emitted) ---
+  bool connected = hp && hp->isConnected();
+  m_b(out, F("gootac_ac_connected"), connected);
+  if (connected) {
+    heatpumpSettings s  = hp->getSettings();
+    heatpumpSettings w  = hp->getWantedSettings();
+    heatpumpStatus   st = hp->getStatus();
+
+    m_b(out, F("gootac_ac_power_on"),   hp->getPowerSettingBool());
+    m_b(out, F("gootac_ac_operating"),  st.operating);
+    m_f(out, F("gootac_room_temperature_celsius"),   hp->getRoomTemperature());
+    m_f(out, F("gootac_target_temperature_celsius"), s.temperature);
+    m_f(out, F("gootac_heating_threshold_celsius"),  currentState.heating_threshold);
+    m_f(out, F("gootac_cooling_threshold_celsius"),  currentState.cooling_threshold);
+    m_b(out, F("gootac_target_active"), currentState.active != 0);
+    m_b(out, F("gootac_swing_mode"),    currentState.swing_mode != 0);
+    m_u(out, F("gootac_actual_fan_speed"), st.actualFanSpeed);
+    m_b(out, F("gootac_ac_filter_dirty"),     (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0);
+    m_b(out, F("gootac_ac_defrost_active"),   (st.statusFlags & HP_STATUS_DEFROST) != 0);
+    m_b(out, F("gootac_ac_preheat_active"),   (st.statusFlags & HP_STATUS_PREHEAT) != 0);
+    m_b(out, F("gootac_ac_blocked_by_other"), (st.statusFlags & HP_STATUS_BLOCKED_BY_OTHER) != 0);
+    m_i(out, F("gootac_ac_status_byte3"), st.statusByte3); // raw 0x06 byte 3, unverified; not degC
+
+    m_type(out, F("gootac_ac_mode_info"));
+    out.print(F("gootac_ac_mode_info{hw_mode=\"")); out.print(s.mode);
+    out.print(F("\",fan=\""));                      out.print(s.fan);
+    out.print(F("\",wanted_fan=\""));               out.print(w.fan);
+    out.print(F("\",target_mode=\""));              out.print(target_mode_str(currentState.target_mode));
+    out.print(F("\"} 1\n"));
+  }
 }
