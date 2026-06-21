@@ -5,7 +5,6 @@
 #include <ArduinoLog.h>
 #include <ESP8266WiFi.h>
 #include <LittleFS.h>
-#include <WiFiClient.h>
 #include <arduino_homekit_server.h>
 
 extern "C" {
