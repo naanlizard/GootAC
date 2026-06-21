@@ -620,22 +620,23 @@ static int tcp_listen_pcb_count() {
 
 // --- Prometheus metric emit helpers ---
 // Line endings are bare LF; Prometheus's text parser rejects CR. Metric names
-// are passed as flash strings (F()) so they never occupy RAM.
-static void m_type(Print& o, const __FlashStringHelper* n) {
+// and HELP text are flash strings (F()) so they never occupy RAM.
+static void m_doc(Print& o, const __FlashStringHelper* n, const __FlashStringHelper* h) {
+  o.print(F("# HELP ")); o.print(n); o.print(' '); o.print(h); o.print('\n');
   o.print(F("# TYPE ")); o.print(n); o.print(F(" gauge\n"));
 }
-static void m_u(Print& o, const __FlashStringHelper* n, uint32_t v) {
-  m_type(o, n); o.print(n); o.print(' '); o.print(v); o.print('\n');
+static void m_u(Print& o, const __FlashStringHelper* n, const __FlashStringHelper* h, uint32_t v) {
+  m_doc(o, n, h); o.print(n); o.print(' '); o.print(v); o.print('\n');
 }
-static void m_i(Print& o, const __FlashStringHelper* n, int32_t v) {
-  m_type(o, n); o.print(n); o.print(' '); o.print(v); o.print('\n');
+static void m_i(Print& o, const __FlashStringHelper* n, const __FlashStringHelper* h, int32_t v) {
+  m_doc(o, n, h); o.print(n); o.print(' '); o.print(v); o.print('\n');
 }
-static void m_b(Print& o, const __FlashStringHelper* n, bool v) {
-  m_type(o, n); o.print(n); o.print(' '); o.print(v ? '1' : '0'); o.print('\n');
+static void m_b(Print& o, const __FlashStringHelper* n, const __FlashStringHelper* h, bool v) {
+  m_doc(o, n, h); o.print(n); o.print(' '); o.print(v ? '1' : '0'); o.print('\n');
 }
-static void m_f(Print& o, const __FlashStringHelper* n, float v) {
+static void m_f(Print& o, const __FlashStringHelper* n, const __FlashStringHelper* h, float v) {
   char b[16]; dtostrf(v, 1, 1, b); // 1 decimal — 0.1C room-sensor resolution
-  m_type(o, n); o.print(n); o.print(' '); o.print(b); o.print('\n');
+  m_doc(o, n, h); o.print(n); o.print(' '); o.print(b); o.print('\n');
 }
 // currentState.target_mode: 0=COOL, 1=HEAT, 2=AUTO (see ac_controller.h).
 static const __FlashStringHelper* target_mode_str(uint8_t m) {
@@ -649,51 +650,51 @@ static const __FlashStringHelper* target_mode_str(uint8_t m) {
 
 void ac_controller_write_metrics(Print& out) {
   // --- Identity ---
-  m_type(out, F("gootac_info"));
+  m_doc(out, F("gootac_info"), F("Firmware/build identity; value is always 1."));
   out.print(F("gootac_info{version=\"")); out.print(F(FW_VERSION));
   out.print(F("\",device=\""));           out.print(F(DEVICE_NAME));
   out.print(F("\"} 1\n"));
 
   // --- System / network (always emitted) ---
-  m_u(out, F("gootac_uptime_seconds"),            millis() / 1000);
-  m_u(out, F("gootac_free_heap_bytes"),           ESP.getFreeHeap());
-  m_u(out, F("gootac_heap_max_free_block_bytes"), ESP.getMaxFreeBlockSize());
-  m_u(out, F("gootac_heap_fragmentation_percent"),ESP.getHeapFragmentation());
-  m_i(out, F("gootac_wifi_rssi_dbm"),             WiFi.RSSI());
+  m_u(out, F("gootac_uptime_seconds"),             F("Seconds since last boot; wraps at the ~49.7d millis() rollover."), millis() / 1000);
+  m_u(out, F("gootac_free_heap_bytes"),            F("Free heap memory in bytes."),                   ESP.getFreeHeap());
+  m_u(out, F("gootac_heap_max_free_block_bytes"),  F("Largest contiguous free heap block in bytes."), ESP.getMaxFreeBlockSize());
+  m_u(out, F("gootac_heap_fragmentation_percent"), F("Heap fragmentation percentage (0-100)."),       ESP.getHeapFragmentation());
+  m_i(out, F("gootac_wifi_rssi_dbm"),              F("WiFi signal strength in dBm."),                 WiFi.RSSI());
 
-  m_type(out, F("gootac_tcp_pcb"));
+  m_doc(out, F("gootac_tcp_pcb"), F("Open lwIP TCP PCBs by state."));
   out.print(F("gootac_tcp_pcb{state=\"active\"} "));   out.print(tcp_pcb_count(tcp_active_pcbs)); out.print('\n');
   out.print(F("gootac_tcp_pcb{state=\"listen\"} "));   out.print(tcp_listen_pcb_count());         out.print('\n');
   out.print(F("gootac_tcp_pcb{state=\"timewait\"} ")); out.print(tcp_pcb_count(tcp_tw_pcbs));      out.print('\n');
 
   homekit_server_t* hk = arduino_homekit_get_running_server();
-  m_b(out, F("gootac_homekit_paired"),  hk ? hk->paired : false);
-  m_u(out, F("gootac_homekit_clients"), hk ? (uint32_t)hk->nfds : 0);
+  m_b(out, F("gootac_homekit_paired"),  F("1 if a HomeKit controller is paired, else 0."), hk ? hk->paired : false);
+  m_u(out, F("gootac_homekit_clients"), F("Active HomeKit client connections."),           hk ? (uint32_t)hk->nfds : 0);
 
   // --- AC / heatpump (guarded; gootac_ac_connected always emitted) ---
   bool connected = hp && hp->isConnected();
-  m_b(out, F("gootac_ac_connected"), connected);
+  m_b(out, F("gootac_ac_connected"), F("1 if the CN105 link to the AC is up, else 0."), connected);
   if (connected) {
     heatpumpSettings s  = hp->getSettings();
     heatpumpSettings w  = hp->getWantedSettings();
     heatpumpStatus   st = hp->getStatus();
 
-    m_b(out, F("gootac_ac_power_on"),   hp->getPowerSettingBool());
-    m_b(out, F("gootac_ac_operating"),  st.operating);
-    m_f(out, F("gootac_room_temperature_celsius"),   hp->getRoomTemperature());
-    m_f(out, F("gootac_target_temperature_celsius"), s.temperature);
-    m_f(out, F("gootac_heating_threshold_celsius"),  currentState.heating_threshold);
-    m_f(out, F("gootac_cooling_threshold_celsius"),  currentState.cooling_threshold);
-    m_b(out, F("gootac_target_active"), currentState.active != 0);
-    m_b(out, F("gootac_swing_mode"),    currentState.swing_mode != 0);
-    m_u(out, F("gootac_actual_fan_speed"), st.actualFanSpeed);
-    m_b(out, F("gootac_ac_filter_dirty"),     (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0);
-    m_b(out, F("gootac_ac_defrost_active"),   (st.statusFlags & HP_STATUS_DEFROST) != 0);
-    m_b(out, F("gootac_ac_preheat_active"),   (st.statusFlags & HP_STATUS_PREHEAT) != 0);
-    m_b(out, F("gootac_ac_blocked_by_other"), (st.statusFlags & HP_STATUS_BLOCKED_BY_OTHER) != 0);
-    m_i(out, F("gootac_ac_status_byte3"), st.statusByte3); // raw 0x06 byte 3, unverified; not degC
+    m_b(out, F("gootac_ac_power_on"),  F("1 if the AC is powered on, else 0."),               hp->getPowerSettingBool());
+    m_b(out, F("gootac_ac_operating"), F("1 if the AC is actively heating/cooling, else 0."), st.operating);
+    m_f(out, F("gootac_room_temperature_celsius"),   F("Room temperature measured by the AC, in Celsius."), hp->getRoomTemperature());
+    m_f(out, F("gootac_target_temperature_celsius"), F("AC setpoint temperature in Celsius."),              s.temperature);
+    m_f(out, F("gootac_heating_threshold_celsius"),  F("HomeKit auto-mode heating threshold in Celsius."),  currentState.heating_threshold);
+    m_f(out, F("gootac_cooling_threshold_celsius"),  F("HomeKit auto-mode cooling threshold in Celsius."),  currentState.cooling_threshold);
+    m_b(out, F("gootac_target_active"), F("1 if the HomeKit HeaterCooler service is active, else 0."), currentState.active != 0);
+    m_b(out, F("gootac_swing_mode"),    F("1 if vane swing is enabled, else 0."),                      currentState.swing_mode != 0);
+    m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
+    m_b(out, F("gootac_ac_filter_dirty"),     F("1 if the AC reports the filter needs cleaning, else 0."),          (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0);
+    m_b(out, F("gootac_ac_defrost_active"),   F("1 if the AC is defrosting, else 0."),                              (st.statusFlags & HP_STATUS_DEFROST) != 0);
+    m_b(out, F("gootac_ac_preheat_active"),   F("1 if the AC is preheating, else 0."),                              (st.statusFlags & HP_STATUS_PREHEAT) != 0);
+    m_b(out, F("gootac_ac_blocked_by_other"), F("1 if blocked by another unit on the shared outdoor unit, else 0."), (st.statusFlags & HP_STATUS_BLOCKED_BY_OTHER) != 0);
+    m_i(out, F("gootac_ac_status_byte3"), F("Raw byte 3 of the 0x06 status packet; unverified outdoor telemetry, NOT degrees C."), st.statusByte3);
 
-    m_type(out, F("gootac_ac_mode_info"));
+    m_doc(out, F("gootac_ac_mode_info"), F("Hardware mode, fan, wanted fan, and HomeKit target mode as labels; value always 1."));
     out.print(F("gootac_ac_mode_info{hw_mode=\"")); out.print(s.mode);
     out.print(F("\",fan=\""));                      out.print(s.fan);
     out.print(F("\",wanted_fan=\""));               out.print(w.fan);
