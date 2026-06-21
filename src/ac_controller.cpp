@@ -2,8 +2,8 @@
 #include "homekit_ac.h"
 #include "config.h"
 #include <Arduino.h>
-#include <ArduinoJson.h>
 #include <ArduinoLog.h>
+#include <ESP8266WiFi.h>
 #include <LittleFS.h>
 #include <WiFiClient.h>
 #include <arduino_homekit_server.h>
@@ -619,60 +619,44 @@ static int tcp_listen_pcb_count() {
   return n;
 }
 
-String ac_controller_get_json_status() {
-  StaticJsonDocument<1024> doc;
-  JsonObject internal = doc.createNestedObject("target_state_bus");
-  internal["active"] = currentState.active;
-  internal["mode"] = currentState.target_mode;
-  internal["heat_thr"] = currentState.heating_threshold;
-  internal["cool_thr"] = currentState.cooling_threshold;
-  internal["swing_mode"] = currentState.swing_mode;
+// --- Prometheus metric emit helpers ---
+// Line endings are bare LF; Prometheus's text parser rejects CR. Metric names
+// are passed as flash strings (F()) so they never occupy RAM.
+static void m_type(Print& o, const __FlashStringHelper* n) {
+  o.print(F("# TYPE ")); o.print(n); o.print(F(" gauge\n"));
+}
+static void m_u(Print& o, const __FlashStringHelper* n, uint32_t v) {
+  m_type(o, n); o.print(n); o.print(' '); o.print(v); o.print('\n');
+}
+static void m_i(Print& o, const __FlashStringHelper* n, int32_t v) {
+  m_type(o, n); o.print(n); o.print(' '); o.print(v); o.print('\n');
+}
+static void m_b(Print& o, const __FlashStringHelper* n, bool v) {
+  m_type(o, n); o.print(n); o.print(' '); o.print(v ? '1' : '0'); o.print('\n');
+}
 
-  if (hp && hp->isConnected()) {
-    heatpumpSettings s = hp->getSettings();
-    heatpumpSettings w = hp->getWantedSettings();
-    heatpumpStatus st = hp->getStatus();
-    JsonObject hw = doc.createNestedObject("hardware_status");
-    hw["power"] = s.power;
-    hw["mode"] = s.mode;
-    hw["temp"] = s.temperature;
-    // Last-received vs last-commanded fan setting. Lets you verify that
-    // the AC is configured for AUTO ("AUTO" string) rather than a manual
-    // step ("QUIET"/"1".."4") that could explain a stuck fan speed.
-    hw["current_fan"] = s.fan;
-    hw["wanted_fan"] = w.fan;
-    hw["room"] = hp->getRoomTemperature();
-    hw["operating"] = st.operating;
-    // Raw byte 3 of the 0x06 status packet. Semantic unverified — see
-    // heatpumpStatus::statusByte3 comment in HeatPump.h. Reported without
-    // unit or transform; previous "indoor_coil_c = byte + 10" field was
-    // based on a wrong interpretation and has been removed.
-    hw["status_byte3"] = st.statusByte3;
-    // 0x09 status flags (bitmask). Surfaced individually for clarity.
-    hw["filter_dirty"]      = (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0;
-    hw["defrost_active"]    = (st.statusFlags & HP_STATUS_DEFROST) != 0;
-    hw["preheat_active"]    = (st.statusFlags & HP_STATUS_PREHEAT) != 0;
-    hw["blocked_by_other"]  = (st.statusFlags & HP_STATUS_BLOCKED_BY_OTHER) != 0;
-    hw["actual_fan_speed"]  = st.actualFanSpeed;
-    hw["auto_sub_mode"]     = st.autoSubMode & 0x0F;
-    hw["auto_leader"]       = (st.autoSubMode & 0x40) != 0;
-  }
+void ac_controller_write_metrics(Print& out) {
+  // --- Identity ---
+  m_type(out, F("gootac_info"));
+  out.print(F("gootac_info{version=\"")); out.print(F(FW_VERSION));
+  out.print(F("\",device=\""));           out.print(F(DEVICE_NAME));
+  out.print(F("\"} 1\n"));
 
-  JsonObject diag = doc.createNestedObject("diag");
-  diag["free_heap"] = ESP.getFreeHeap();
-  diag["max_block"] = ESP.getMaxFreeBlockSize();
-  diag["heap_frag_pct"] = ESP.getHeapFragmentation();
-  diag["tcp_active"] = tcp_pcb_count(tcp_active_pcbs);
-  diag["tcp_listen"] = tcp_listen_pcb_count();
-  diag["tcp_tw"] = tcp_pcb_count(tcp_tw_pcbs);
-  diag["uptime_s"] = millis() / 1000;
-  homekit_server_t *hk = arduino_homekit_get_running_server();
-  if (hk) {
-    diag["hk_paired"] = hk->paired;
-    diag["hk_clients"] = hk->nfds;
-  }
+  // --- System / network (always emitted) ---
+  m_u(out, F("gootac_uptime_seconds"),            millis() / 1000);
+  m_u(out, F("gootac_free_heap_bytes"),           ESP.getFreeHeap());
+  m_u(out, F("gootac_heap_max_free_block_bytes"), ESP.getMaxFreeBlockSize());
+  m_u(out, F("gootac_heap_fragmentation_percent"),ESP.getHeapFragmentation());
+  m_i(out, F("gootac_wifi_rssi_dbm"),             WiFi.RSSI());
 
-  String output;
-  serializeJson(doc, output);
-  return output;
+  m_type(out, F("gootac_tcp_pcb"));
+  out.print(F("gootac_tcp_pcb{state=\"active\"} "));   out.print(tcp_pcb_count(tcp_active_pcbs)); out.print('\n');
+  out.print(F("gootac_tcp_pcb{state=\"listen\"} "));   out.print(tcp_listen_pcb_count());         out.print('\n');
+  out.print(F("gootac_tcp_pcb{state=\"timewait\"} ")); out.print(tcp_pcb_count(tcp_tw_pcbs));      out.print('\n');
+
+  homekit_server_t* hk = arduino_homekit_get_running_server();
+  m_b(out, F("gootac_homekit_paired"),  hk ? hk->paired : false);
+  m_u(out, F("gootac_homekit_clients"), hk ? (uint32_t)hk->nfds : 0);
+
+  // --- AC / heatpump block: added in Task 2 ---
 }

@@ -43,6 +43,30 @@ extern "C" {
 #endif
 
 ESP8266WebServer server(80);
+
+// Streams Print output to the HTTP client in ~256 B chunks so a full /metrics
+// body never lives in RAM at once. Content-transparent (the metric writer
+// supplies bare-LF lines).
+class ChunkedPrint : public Print {
+  ESP8266WebServer& _srv;
+  uint8_t _buf[256];
+  size_t _len = 0;
+public:
+  explicit ChunkedPrint(ESP8266WebServer& s) : _srv(s) {}
+  size_t write(uint8_t c) override {
+    _buf[_len++] = c;
+    if (_len == sizeof(_buf)) flushChunk();
+    return 1;
+  }
+  size_t write(const uint8_t* data, size_t n) override {
+    for (size_t i = 0; i < n; i++) write(data[i]);
+    return n;
+  }
+  void flushChunk() {
+    if (_len) { _srv.sendContent((const char*)_buf, _len); _len = 0; yield(); }
+  }
+};
+
 char hostName[32];
 char accessoryName[32];
 const char *ssid = WIFI_SSID;
@@ -160,9 +184,13 @@ void setup_webserver() {
     server.sendContent(""); // End response
   });
 
-  server.on("/status", HTTP_GET, []() {
-    extern String ac_controller_get_json_status();
-    server.send(200, "application/json", ac_controller_get_json_status());
+  server.on("/metrics", HTTP_GET, []() {
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/plain; version=0.0.4; charset=utf-8", "");
+    ChunkedPrint out(server);
+    ac_controller_write_metrics(out);
+    out.flushChunk();
+    server.sendContent(""); // terminate chunked response
   });
 
   // Recovery endpoint: wipe HomeKit pairings + reboot. Needed when stale

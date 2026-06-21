@@ -95,7 +95,7 @@ pip install -r requirements.txt
 Logs are stored on the internal SPIFFS/LittleFS storage to preserve history across reboots and network instability. They can be viewed directly via the web browser:
 - `http://<DEVICE_IP>/log` - Current session logs.
 - `http://<DEVICE_IP>/log.old` - Archived logs from previous boot.
-- `http://<DEVICE_IP>/status` - Raw JSON hardware state.
+- `http://<DEVICE_IP>/metrics` - Prometheus text-format metrics (heap, WiFi, TCP, HomeKit, AC state).
 
 ---
 

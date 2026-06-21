@@ -35,8 +35,9 @@ void ac_controller_sync_from_ac();
 void ac_controller_identify();
 
 #ifdef __cplusplus
-// Status for WebServer
-String ac_controller_get_json_status();
+// Streams Prometheus text-exposition metrics to a Print sink (the web server's
+// chunked-response adapter). Replaces the former JSON /status body.
+void ac_controller_write_metrics(Print& out);
 #endif
 
 #ifdef __cplusplus
