@@ -393,23 +393,6 @@ void loop() {
     ESP.restart();
   }
 
-  // --- Periodic Preventative Maintenance ---
-  // Reboot silently after 24 hours to cure memory fragmentation, HomeKit
-  // session exhaustion, and mDNS sync issues. We only trigger this if the
-  // physical AC isn't doing anything important (e.g., active = 0).
-  if (millis() > 86400000UL) { // > 24 hours
-    if (homekitStarted && cha_ac_active.value.uint8_value == 0) {
-      GLOG_INFO("SYS", "Performing standard 24h maintenance reboot (AC is idle)...");
-      delay(100);
-      ESP.restart();
-    } else if (millis() >
-               172800000UL) { // > 48 hours (if the AC never stops running)
-      GLOG_WARN("SYS", "Performing mandatory 48h maintenance reboot...");
-      delay(100);
-      ESP.restart();
-    }
-  }
-
 
   if (!homekitStarted) {
     bool hasAcData =
