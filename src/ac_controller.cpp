@@ -88,11 +88,18 @@ uint32_t calculate_checksum(TargetState *ts) {
 
 // Save and Load binary state
 void save_target_state() {
+  currentState.checksum = calculate_checksum(&currentState);
+  // Skip byte-identical rewrites — most save calls repersist unchanged state.
+  static TargetState lastSaved;
+  static bool haveSaved = false;
+  if (haveSaved && memcmp(&lastSaved, &currentState, sizeof(TargetState)) == 0)
+    return;
   File f = LittleFS.open(STATE_FILE, "w");
   if (f) {
-    currentState.checksum = calculate_checksum(&currentState);
     f.write((uint8_t *)&currentState, sizeof(TargetState));
     f.close();
+    lastSaved = currentState;
+    haveSaved = true;
     char cBuf[10], hBuf[10];
     dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
     dtostrf(currentState.heating_threshold, 1, 1, hBuf);
@@ -511,7 +518,7 @@ void update_physical_ac() {
     pending_update = false;
     GLOG_INFO("MITSUBISHI", "Updating physical AC unit...");
     hp->update();
-    if (changed || pu) save_target_state(); // fan-only changes aren't persisted
+    if (pu) save_target_state(); // persisted state only changes via HK setters
     if (changed || fan_changed) pending_sync_request = true;
   }
 }

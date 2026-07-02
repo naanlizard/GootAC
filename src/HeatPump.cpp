@@ -140,6 +140,16 @@ bool HeatPump::connect(HardwareSerial *serial, bool retry) {
 
 bool HeatPump::update() {
   _externalUpdateOccurred = false;
+
+  byte packet[PACKET_LEN] = {};
+  createPacket(packet, wantedSettings);
+  // No control bits set = nothing to command. The unit still reacts to such
+  // packets (observed: resets its native AUTO-fan state machine), so skip.
+  if (packet[6] == 0 && packet[7] == 0) {
+    GLOG_TRACE("MITSUBISHI", "UPDATE skipped (no pending control bits)");
+    return true;
+  }
+
   uint32_t sendStart = millis();
   while (!canSend(false) && (millis() - sendStart < 2000)) {
     ESP.wdtFeed();
@@ -147,8 +157,6 @@ bool HeatPump::update() {
     delay(10);
   }
 
-  byte packet[PACKET_LEN] = {};
-  createPacket(packet, wantedSettings);
   GLOG_INFO("MITSUBISHI", "Sending UPDATE (Power=%s, Mode=%s, Temp=%sC)",
             wantedSettings.power, wantedSettings.mode,
             String(wantedSettings.temperature, 1).c_str());
