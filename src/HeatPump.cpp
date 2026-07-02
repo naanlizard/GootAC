@@ -301,21 +301,20 @@ void HeatPump::setModeIndex(uint8_t modeIndex) {
 float HeatPump::getTemperature() { return currentSettings.temperature; }
 
 void HeatPump::setTemperature(float setting) {
-  if (abs(wantedSettings.temperature - setting) < 0.1)
+  // Quantize/clamp to the unit's grid before the no-op guard so repeated
+  // calls with the same raw (possibly off-grid) value are true no-ops.
+  if (!tempMode) {
+    setting = lookupByteMapIndex(TEMP_MAP, 16, (int)(setting + 0.5)) > -1
+                  ? setting
+                  : TEMP_MAP[0];
+  } else {
+    setting = round(setting * 2) / 2;
+    setting = setting < 10 ? 10 : (setting > 31 ? 31 : setting);
+  }
+  if (fabsf(wantedSettings.temperature - setting) < 0.1f)
     return;
   GLOG_TRACE("MITSUBISHI", "Set Temp: %sC", String(setting, 1).c_str());
-  if (!tempMode) {
-    wantedSettings.temperature =
-        lookupByteMapIndex(TEMP_MAP, 16, (int)(setting + 0.5)) > -1
-            ? setting
-            : TEMP_MAP[0];
-  } else {
-    setting = setting * 2;
-    setting = round(setting);
-    setting = setting / 2;
-    wantedSettings.temperature =
-        setting < 10 ? 10 : (setting > 31 ? 31 : setting);
-  }
+  wantedSettings.temperature = setting;
 }
 
 void HeatPump::setRemoteTemperature(float setting) {

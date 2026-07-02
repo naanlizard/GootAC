@@ -149,7 +149,10 @@ void HeatPump::setModeIndex(uint8_t modeIndex) {
 
 float HeatPump::getTemperature() { return currentSettings.temperature; }
 void HeatPump::setTemperature(float setting) {
-  wantedSettings.temperature = setting;
+  // Mirror the real driver's half-degree quantize/clamp so the fake env
+  // exercises the same grid behavior.
+  setting = round(setting * 2) / 2;
+  wantedSettings.temperature = setting < 10 ? 10 : (setting > 31 ? 31 : setting);
 }
 
 void HeatPump::setRemoteTemperature(float /*setting*/) { /* no-op */ }

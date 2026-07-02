@@ -493,13 +493,17 @@ void update_physical_ac() {
        lastSetTime = now; changed = true;
     }
     
-    // Temp comparison
-    if (hpMode != 3 && abs(hpTemp - wanted.temperature) > 0.1) {
-      char tempBuf[10];
-      dtostrf(hpTemp, 1, 1, tempBuf);
-      GLOG_INFO("MITSUBISHI", "COMMAND: Temp -> %sC", tempBuf);
+    // Temp: the library quantizes to the unit's grid; treat as changed only
+    // if wantedSettings moved (raw-vs-quantized compares re-fire forever).
+    if (hpMode != 3) {
       hp->setTemperature(hpTemp);
-      lastSetTime = now; changed = true;
+      float newTemp = hp->getWantedSettings().temperature;
+      if (newTemp != wanted.temperature) {
+        char tempBuf[10];
+        dtostrf(newTemp, 1, 1, tempBuf);
+        GLOG_INFO("MITSUBISHI", "COMMAND: Temp -> %sC", tempBuf);
+        lastSetTime = now; changed = true;
+      }
     }
   }
 
