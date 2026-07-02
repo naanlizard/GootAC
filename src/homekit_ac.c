@@ -101,5 +101,10 @@ homekit_server_config_t config = {
     //               cha_dehumidifier_current_humidity to HUMIDIFIER_DEHUMIDIFIER
     //   3 = v1.13 — removed cha_ac_rotation_speed + cha_ac_target_fan_state
     //               from HEATER_COOLER (fan permanently delegated to AC AUTO)
-    .config_number = 3
+    //   4,5 = v1.18 canary-only fan-control experiment (rotation_speed, then
+    //         + target_fan_state); flashed only to Simples, retired same night
+    //         after iOS rendered the controls poorly
+    //   6 = v1.18 — fan characteristics removed again; must exceed the 4/5
+    //       schemas cached by the canary's paired controller
+    .config_number = 6
 };

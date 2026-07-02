@@ -145,6 +145,8 @@ bool HeatPump::update() {
   createPacket(packet, wantedSettings);
   // No control bits set = nothing to command. The unit still reacts to such
   // packets (observed: resets its native AUTO-fan state machine), so skip.
+  // NB: if enableAutoUpdate() is ever used, make sure wanted/current cannot
+  // diverge on fields createPacket ignores (iSee) or sync() will spin here.
   if (packet[6] == 0 && packet[7] == 0) {
     GLOG_TRACE("MITSUBISHI", "UPDATE skipped (no pending control bits)");
     return true;
