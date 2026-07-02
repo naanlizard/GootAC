@@ -3,7 +3,7 @@
 
 struct TargetState {
     uint8_t active;              // 0: Off, 1: On
-    uint8_t target_mode;         // 0: COOL, 1: HEAT, 2: AUTO
+    uint8_t target_mode;         // HomeKit TargetHeaterCoolerState: 0: AUTO, 1: HEAT, 2: COOL
     float cooling_threshold;
     float heating_threshold;
     uint8_t swing_mode;          // 0: OFF, 1: SWING

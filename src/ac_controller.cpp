@@ -2,6 +2,7 @@
 #include "homekit_ac.h"
 #include "config.h"
 #include <Arduino.h>
+#include <math.h>
 #include <ArduinoLog.h>
 #include <ESP8266WiFi.h>
 #include <LittleFS.h>
@@ -52,6 +53,28 @@ void hk_log_info(const char *fmt, ...) {
 static HeatPump *hp;
 static TargetState currentState;
 static const char *STATE_FILE = "/target_state.bin";
+
+// --- GootAC-driven fan ramp (replaces delegating fan to the unit's AUTO) -----
+// FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4" (25/50/75/100%).
+#define FAN_IDX_MIN 2             // 25% floor while actively conditioning
+#define FAN_RAMP_SPAN_C 1.5f      // room-vs-setpoint delta at which fan hits 100%
+#define FAN_STEP_DOWN_MS 60000UL  // sustained lower demand before easing fan down
+#define MODE_HYST_C 0.5f          // Smart-Auto COOL/HEAT release hysteresis
+
+static uint8_t g_fan_target_idx = 0;   // last commanded fan index, for /metrics
+static float   g_control_delta_c = 0.0f;
+
+// Exponential airflow: 25% at the setpoint, 100% at FAN_RAMP_SPAN_C. Nearest-step
+// quantization keeps all four levels reachable at the AC's 0.5C temp resolution.
+static uint8_t fan_index_for_delta(float delta) {
+  if (delta < 0.0f) delta = 0.0f;
+  float x = delta / FAN_RAMP_SPAN_C;
+  if (x > 1.0f) x = 1.0f;
+  int step = (int)lroundf(0.25f * powf(4.0f, x) * 4.0f); // 1..4
+  if (step < 1) step = 1;
+  if (step > 4) step = 4;
+  return (uint8_t)(step + 1);                            // 2..5
+}
 
 // Helper: Calculate checksum for binary integrity
 uint32_t calculate_checksum(TargetState *ts) {
@@ -356,13 +379,23 @@ void update_physical_ac() {
       hpPower = true; hpMode = 2; hpTemp = coolThr;
     } else if (hk_target_mode == 0) { // Smart Auto
       if (roomTemp > 1.0) {
-        if (roomTemp < heatThr) {
-          hpPower = true; hpMode = 0; hpTemp = heatThr;
-        } else if (roomTemp > coolThr) {
-          hpPower = true; hpMode = 2; hpTemp = coolThr;
+        // Hold the current direction until the room crosses back past the
+        // setpoint by MODE_HYST_C, so we don't chatter COOL<->FAN at the edge.
+        static int8_t sa_mode = -1; // -1 uninit; 0=HEAT, 2=COOL, 3=FAN(deadband)
+        if (sa_mode == 2) {
+          if (roomTemp < heatThr) sa_mode = 0;
+          else if (roomTemp < coolThr - MODE_HYST_C) sa_mode = 3;
+        } else if (sa_mode == 0) {
+          if (roomTemp > coolThr) sa_mode = 2;
+          else if (roomTemp > heatThr + MODE_HYST_C) sa_mode = 3;
         } else {
-          hpPower = true; hpMode = 3; // FAN: circulate air while in deadband
+          if (roomTemp < heatThr) sa_mode = 0;
+          else if (roomTemp > coolThr) sa_mode = 2;
+          else sa_mode = 3;
         }
+        hpPower = true;
+        hpMode  = (sa_mode == 0) ? 0 : (sa_mode == 2) ? 2 : 3;
+        hpTemp  = (sa_mode == 0) ? heatThr : coolThr; // ignored when hpMode==3
       } else {
         hpPower = true; hpMode = 4; // Native AUTO if room temp unknown
       }
@@ -394,6 +427,36 @@ void update_physical_ac() {
     strncpy(lastRationale, rationale, sizeof(lastRationale)-1);
   }
 
+  // --- Fan target: GootAC drives the fan directly. 0 = delegate to unit AUTO. ---
+  uint8_t fan_idx = 0;
+  {
+    bool room_known = (roomTemp > 1.0f);
+    static uint8_t last_fan_idx = 0;
+    static unsigned long lower_since = 0;
+    unsigned long now_ms = millis();
+    if (hpPower && room_known && (hpMode == 2 || hpMode == 0)) {
+      float delta = (hpMode == 2) ? (roomTemp - coolThr) : (heatThr - roomTemp);
+      uint8_t desired = fan_index_for_delta(delta);
+      // Ramp up at once; ease down only after sustained lower demand.
+      if (last_fan_idx < FAN_IDX_MIN || desired > last_fan_idx) {
+        last_fan_idx = desired; lower_since = 0;
+      } else if (desired < last_fan_idx) {
+        if (lower_since == 0) lower_since = now_ms;
+        if (now_ms - lower_since >= FAN_STEP_DOWN_MS) { last_fan_idx = desired; lower_since = 0; }
+      } else {
+        lower_since = 0;
+      }
+      fan_idx = last_fan_idx;
+      g_control_delta_c = delta;
+    } else if (hpPower && room_known && hpMode == 3) {
+      fan_idx = FAN_IDX_MIN; last_fan_idx = FAN_IDX_MIN; lower_since = 0; g_control_delta_c = 0.0f;
+    } else {
+      fan_idx = 0; last_fan_idx = 0; lower_since = 0; g_control_delta_c = 0.0f;
+    }
+    g_fan_target_idx = fan_idx;
+  }
+  const char *prev_fan = hp->getWantedSettings().fan;
+
   // Identify Override
   if (identify_active) {
     hpPower = true; 
@@ -402,14 +465,14 @@ void update_physical_ac() {
     hp->setFanSpeedIndex(5); // 4 (Max)
   } else {
     hp->setVaneIndex(currentState.swing_mode == 1 ? 6 : 0); // 6:SWING, 0:AUTO
-    // Fan speed is permanently delegated to the AC's own AUTO algorithm.
-    // The HK rotation_speed / target_fan_state characteristics were
-    // removed from the accessory database in v1.13 (see homekit_ac.c).
-    hp->setFanSpeedIndex(0);
+    // Fan driven by fan_index_for_delta (computed above); 0 = delegate to AUTO.
+    hp->setFanSpeedIndex(fan_idx);
   }
 
   unsigned long now = millis();
   bool changed = false;
+  bool pu = pending_update;
+  bool fan_changed = (strcmp(prev_fan, hp->getWantedSettings().fan) != 0);
   heatpumpSettings wanted = hp->getWantedSettings();
 
   // --- Physical Hardware Commands ---
@@ -440,12 +503,12 @@ void update_physical_ac() {
     }
   }
 
-  if (changed || pending_update) {
+  if (changed || fan_changed || pu) {
     pending_update = false;
     GLOG_INFO("MITSUBISHI", "Updating physical AC unit...");
     hp->update();
-    save_target_state();
-    if (changed) pending_sync_request = true;
+    if (changed || pu) save_target_state(); // fan-only changes aren't persisted
+    if (changed || fan_changed) pending_sync_request = true;
   }
 }
 
@@ -638,12 +701,13 @@ static void m_f(Print& o, const __FlashStringHelper* n, const __FlashStringHelpe
   char b[16]; dtostrf(v, 1, 1, b); // 1 decimal — 0.1C room-sensor resolution
   m_doc(o, n, h); o.print(n); o.print(' '); o.print(b); o.print('\n');
 }
-// currentState.target_mode: 0=COOL, 1=HEAT, 2=AUTO (see ac_controller.h).
+// currentState.target_mode holds the HomeKit TargetHeaterCoolerState enum:
+// 0=AUTO, 1=HEAT, 2=COOL (matches the setter and the decision logic).
 static const __FlashStringHelper* target_mode_str(uint8_t m) {
   switch (m) {
-    case 0:  return F("COOL");
+    case 0:  return F("AUTO");
     case 1:  return F("HEAT");
-    case 2:  return F("AUTO");
+    case 2:  return F("COOL");
     default: return F("UNKNOWN");
   }
 }
@@ -688,6 +752,8 @@ void ac_controller_write_metrics(Print& out) {
     m_b(out, F("gootac_target_active"), F("1 if the HomeKit HeaterCooler service is active, else 0."), currentState.active != 0);
     m_b(out, F("gootac_swing_mode"),    F("1 if vane swing is enabled, else 0."),                      currentState.swing_mode != 0);
     m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
+    m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_fan_target_idx);
+    m_f(out, F("gootac_control_delta_celsius"), F("How far the room is past the active setpoint on the demand side (>=0); drives the fan ramp. 0 when idle."), g_control_delta_c);
     m_b(out, F("gootac_ac_filter_dirty"),     F("1 if the AC reports the filter needs cleaning, else 0."),          (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0);
     m_b(out, F("gootac_ac_defrost_active"),   F("1 if the AC is defrosting, else 0."),                              (st.statusFlags & HP_STATUS_DEFROST) != 0);
     m_b(out, F("gootac_ac_preheat_active"),   F("1 if the AC is preheating, else 0."),                              (st.statusFlags & HP_STATUS_PREHEAT) != 0);
