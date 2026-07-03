@@ -38,6 +38,17 @@ void ac_controller_identify();
 // Streams Prometheus text-exposition metrics to a Print sink (the web server's
 // chunked-response adapter). Replaces the former JSON /status body.
 void ac_controller_write_metrics(Print& out);
+
+// HomeKit characteristic setters, shared with the /control HTTP endpoint in
+// main.cpp so out-of-band writes take the exact same path as HomeKit writes
+// (currentState mirror, pending_update debounce, guards, persistence).
+#include <homekit/homekit.h>
+void set_ac_active(homekit_value_t value);
+void set_ac_target_state(homekit_value_t value);
+void set_ac_cooling_threshold(homekit_value_t value);
+void set_ac_heating_threshold(homekit_value_t value);
+void set_ac_swing_mode(homekit_value_t value);
+void set_dehumidifier_active(homekit_value_t value);
 #endif
 
 #ifdef __cplusplus

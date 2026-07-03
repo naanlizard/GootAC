@@ -227,6 +227,94 @@ void setup_webserver() {
     ESP.restart();
   });
 
+  // Out-of-band target-state control. Drives the exact same setter code paths
+  // as HomeKit writes (currentState mirror, pending_update debounce, threshold
+  // guards, persistence), so it exercises the controller without an iOS
+  // device. Same LAN trust model as /reboot; requires ?confirm=yes.
+  // Fields: dehumidifier|active|swing (0/1), mode (0 AUTO,1 HEAT,2 COOL),
+  // heat|cool (16..31 C). Applied in fixed order dehumidifier, active, mode,
+  // heat, cool, swing, so dehumidifier=0&active=1 cannot leave a transient
+  // OFF target. All-or-nothing: any invalid value applies nothing.
+  server.on("/control", HTTP_GET, []() {
+    if (server.arg("confirm") != "yes") {
+      server.send(400, "application/json",
+                  "{\"error\":\"require ?confirm=yes\"}");
+      return;
+    }
+    if (!homekitStarted) {
+      server.send(503, "application/json",
+                  "{\"error\":\"homekit not started\"}");
+      return;
+    }
+    // Strict full-string numeric parse. String::toFloat() would turn garbage
+    // into 0.0 — a VALID value for the 0/1 fields — so reject instead.
+    auto parseNum = [](const String &s, float &v) -> bool {
+      if (s.length() == 0) return false;
+      char *end = nullptr;
+      v = strtof(s.c_str(), &end);
+      return end == s.c_str() + s.length() && !isnan(v) && !isinf(v);
+    };
+    struct CtlField { const char *name; float lo; float hi; bool integer; };
+    static const CtlField FIELDS[] = {
+        {"dehumidifier", 0, 1, true}, {"active", 0, 1, true},
+        {"mode", 0, 2, true},         {"heat", 16, 31, false},
+        {"cool", 16, 31, false},      {"swing", 0, 1, true},
+    };
+    float vals[6];
+    bool has[6] = {false, false, false, false, false, false};
+    int nset = 0;
+    for (int i = 0; i < 6; i++) {
+      if (!server.hasArg(FIELDS[i].name)) continue;
+      float v;
+      if (!parseNum(server.arg(FIELDS[i].name), v) || v < FIELDS[i].lo ||
+          v > FIELDS[i].hi || (FIELDS[i].integer && v != (float)(int)v)) {
+        server.send(400, "application/json",
+                    String("{\"error\":\"bad value for ") + FIELDS[i].name +
+                        "\"}");
+        return;
+      }
+      vals[i] = v; has[i] = true; nset++;
+    }
+    if (nset == 0) {
+      server.send(400, "application/json",
+                  "{\"error\":\"no recognized field\"}");
+      return;
+    }
+    GLOG_INFO("SYS", "/control applying %d field(s)", nset);
+    for (int i = 0; i < 6; i++) {
+      if (!has[i]) continue;
+      homekit_value_t v;
+      memset(&v, 0, sizeof(v));
+      if (FIELDS[i].integer) {
+        v.format = homekit_format_uint8;
+        v.uint8_value = (uint8_t)vals[i];
+      } else {
+        v.format = homekit_format_float;
+        v.float_value = vals[i];
+      }
+      switch (i) {
+        case 0: set_dehumidifier_active(v); break;
+        case 1: set_ac_active(v); break;
+        case 2: set_ac_target_state(v); break;
+        case 3: set_ac_heating_threshold(v); break;
+        case 4: set_ac_cooling_threshold(v); break;
+        case 5: set_ac_swing_mode(v); break;
+      }
+    }
+    // Echo the resulting target mirrors so guard-dropped writes are visible.
+    char hBuf[10], cBuf[10], body[160];
+    dtostrf(cha_ac_heating_threshold.value.float_value, 1, 1, hBuf);
+    dtostrf(cha_ac_cooling_threshold.value.float_value, 1, 1, cBuf);
+    snprintf(body, sizeof(body),
+             "{\"ok\":true,\"active\":%u,\"mode\":%u,\"heat\":%s,\"cool\":%s,"
+             "\"swing\":%u,\"dehumidifier\":%u}",
+             cha_ac_active.value.uint8_value,
+             cha_ac_target_state.value.uint8_value, hBuf, cBuf,
+             cha_ac_swing_mode.value.uint8_value,
+             cha_dehumidifier_active.value.uint8_value);
+    server.send(200, "application/json", body);
+  });
+
 #ifdef USE_FAKE_HEATPUMP
   // Diagnostic-only endpoints. Inject simulated IR-remote / sensor changes
   // so the controller's external-update path and HomeKit notifications can

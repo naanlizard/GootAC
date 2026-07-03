@@ -1,4 +1,5 @@
 #include "ac_controller.h"
+#include "ac_decision.h"
 #include "homekit_ac.h"
 #include "config.h"
 #include <Arduino.h>
@@ -54,27 +55,15 @@ static HeatPump *hp;
 static TargetState currentState;
 static const char *STATE_FILE = "/target_state.bin";
 
-// --- GootAC-driven fan ramp (replaces delegating fan to the unit's AUTO) -----
-// FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4" (25/50/75/100%).
-#define FAN_IDX_MIN 2             // 25% floor while actively conditioning
-#define FAN_RAMP_SPAN_C 1.5f      // room-vs-setpoint delta at which fan hits 100%
-#define FAN_STEP_DOWN_MS 60000UL  // sustained lower demand before easing fan down
-#define MODE_HYST_C 0.5f          // Smart-Auto COOL/HEAT release hysteresis
+// Decision core (mode/setpoint/fan-ramp logic + tuning constants) lives in
+// ac_decision.h/.cpp so the host test harness can exercise it. These statics
+// are the controller's single cross-tick DecisionState plus the last outputs,
+// kept for /metrics.
+static DecisionState  g_decision_state;
+static DecisionOutput g_last_decision;
 
 static uint8_t g_fan_target_idx = 0;   // last commanded fan index, for /metrics
 static float   g_control_delta_c = 0.0f;
-
-// Exponential airflow: 25% at the setpoint, 100% at FAN_RAMP_SPAN_C. Nearest-step
-// quantization keeps all four levels reachable at the AC's 0.5C temp resolution.
-static uint8_t fan_index_for_delta(float delta) {
-  if (delta < 0.0f) delta = 0.0f;
-  float x = delta / FAN_RAMP_SPAN_C;
-  if (x > 1.0f) x = 1.0f;
-  int step = (int)lroundf(0.25f * powf(4.0f, x) * 4.0f); // 1..4
-  if (step < 1) step = 1;
-  if (step > 4) step = 4;
-  return (uint8_t)(step + 1);                            // 2..5
-}
 
 // Helper: Calculate checksum for binary integrity
 uint32_t calculate_checksum(TargetState *ts) {
@@ -365,49 +354,32 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
 void update_physical_ac() {
   if (!hp || !hp->isConnected()) return;
 
-  bool target_active = (currentState.active == 1);
-  uint8_t hk_target_mode = currentState.target_mode; // 0:Auto, 1:Heat, 2:Cool
-  float heatThr = currentState.heating_threshold;
-  float coolThr = currentState.cooling_threshold;
-  float roomTemp = hp->getRoomTemperature();
-  bool dehumidify = (currentState.dehumidifier == 1);
+  // Gather inputs, decide (pure function), then apply below. The apply code
+  // from the rationale block onward is unchanged from a805f40; these local
+  // aliases keep it diff-identical.
+  DecisionInput din;
+  din.active = (currentState.active == 1);
+  din.target_mode = currentState.target_mode; // 0:Auto, 1:Heat, 2:Cool
+  din.heat_threshold = currentState.heating_threshold;
+  din.cool_threshold = currentState.cooling_threshold;
+  din.dehumidify = (currentState.dehumidifier == 1);
+  din.room_temp = hp->getRoomTemperature();
+  din.now_ms = millis();
 
-  bool hpPower = false;
-  uint8_t hpMode = 0; // Library Index: 0:HEAT, 1:DRY, 2:COOL, 3:FAN, 4:AUTO
-  float hpTemp = 21.0;
+  const DecisionOutput dout = ac_decide(din, g_decision_state);
+  g_last_decision = dout;
+  g_fan_target_idx = dout.fan_idx;
+  g_control_delta_c = dout.control_delta_c;
 
-  // Decision Logic
-  if (dehumidify) {
-    hpPower = true; hpMode = 1; // DRY
-  } else if (target_active) {
-    if (hk_target_mode == 1) { // HEAT
-      hpPower = true; hpMode = 0; hpTemp = heatThr;
-    } else if (hk_target_mode == 2) { // COOL
-      hpPower = true; hpMode = 2; hpTemp = coolThr;
-    } else if (hk_target_mode == 0) { // Smart Auto
-      if (roomTemp > 1.0) {
-        // Hold the current direction until the room crosses back past the
-        // setpoint by MODE_HYST_C, so we don't chatter COOL<->FAN at the edge.
-        static int8_t sa_mode = -1; // -1 uninit; 0=HEAT, 2=COOL, 3=FAN(deadband)
-        if (sa_mode == 2) {
-          if (roomTemp < heatThr) sa_mode = 0;
-          else if (roomTemp < coolThr - MODE_HYST_C) sa_mode = 3;
-        } else if (sa_mode == 0) {
-          if (roomTemp > coolThr) sa_mode = 2;
-          else if (roomTemp > heatThr + MODE_HYST_C) sa_mode = 3;
-        } else {
-          if (roomTemp < heatThr) sa_mode = 0;
-          else if (roomTemp > coolThr) sa_mode = 2;
-          else sa_mode = 3;
-        }
-        hpPower = true;
-        hpMode  = (sa_mode == 0) ? 0 : (sa_mode == 2) ? 2 : 3;
-        hpTemp  = (sa_mode == 0) ? heatThr : coolThr; // ignored when hpMode==3
-      } else {
-        hpPower = true; hpMode = 4; // Native AUTO if room temp unknown
-      }
-    }
-  }
+  bool target_active = din.active;
+  uint8_t hk_target_mode = din.target_mode;
+  float roomTemp = din.room_temp;
+  bool dehumidify = din.dehumidify;
+
+  bool hpPower = dout.power;
+  uint8_t hpMode = dout.mode; // Library Index: 0:HEAT, 1:DRY, 2:COOL, 3:FAN, 4:AUTO
+  float hpTemp = dout.temp;
+  uint8_t fan_idx = dout.fan_idx;
 
   // --- Decision Logging (Rationale) ---
   char rationale[128] = {0};
@@ -434,34 +406,7 @@ void update_physical_ac() {
     strncpy(lastRationale, rationale, sizeof(lastRationale)-1);
   }
 
-  // --- Fan target: GootAC drives the fan directly. 0 = delegate to unit AUTO. ---
-  uint8_t fan_idx = 0;
-  {
-    bool room_known = (roomTemp > 1.0f);
-    static uint8_t last_fan_idx = 0;
-    static unsigned long lower_since = 0;
-    unsigned long now_ms = millis();
-    if (hpPower && room_known && (hpMode == 2 || hpMode == 0)) {
-      float delta = (hpMode == 2) ? (roomTemp - coolThr) : (heatThr - roomTemp);
-      uint8_t desired = fan_index_for_delta(delta);
-      // Ramp up at once; ease down only after sustained lower demand.
-      if (last_fan_idx < FAN_IDX_MIN || desired > last_fan_idx) {
-        last_fan_idx = desired; lower_since = 0;
-      } else if (desired < last_fan_idx) {
-        if (lower_since == 0) lower_since = now_ms;
-        if (now_ms - lower_since >= FAN_STEP_DOWN_MS) { last_fan_idx = desired; lower_since = 0; }
-      } else {
-        lower_since = 0;
-      }
-      fan_idx = last_fan_idx;
-      g_control_delta_c = delta;
-    } else if (hpPower && room_known && hpMode == 3) {
-      fan_idx = FAN_IDX_MIN; last_fan_idx = FAN_IDX_MIN; lower_since = 0; g_control_delta_c = 0.0f;
-    } else {
-      fan_idx = 0; last_fan_idx = 0; lower_since = 0; g_control_delta_c = 0.0f;
-    }
-    g_fan_target_idx = fan_idx;
-  }
+  // Fan target already decided by ac_decide() (fan_idx; 0 = delegate to AUTO).
   const char *prev_fan = hp->getWantedSettings().fan;
 
   // Identify Override
@@ -472,7 +417,7 @@ void update_physical_ac() {
     hp->setFanSpeedIndex(5); // 4 (Max)
   } else {
     hp->setVaneIndex(currentState.swing_mode == 1 ? 6 : 0); // 6:SWING, 0:AUTO
-    // Fan driven by fan_index_for_delta (computed above); 0 = delegate to AUTO.
+    // Fan driven by ac_decide()'s ramp; 0 = delegate to AUTO.
     hp->setFanSpeedIndex(fan_idx);
   }
 
@@ -765,6 +710,12 @@ void ac_controller_write_metrics(Print& out) {
     m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
     m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_fan_target_idx);
     m_f(out, F("gootac_control_delta_celsius"), F("How far the room is past the active setpoint on the demand side (>=0); drives the fan ramp. 0 when idle."), g_control_delta_c);
+    m_b(out, F("gootac_dehumidifier_active"), F("1 if the HomeKit dehumidifier service is targeted on, else 0."), currentState.dehumidifier != 0);
+    m_b(out, F("gootac_decided_power"), F("Last decision: 1 if the unit should be powered on."), g_last_decision.power);
+    m_i(out, F("gootac_decided_mode_index"), F("Last decision: MODE_MAP index (0 HEAT,1 DRY,2 COOL,3 FAN,4 AUTO); meaningful only when decided power=1."), g_last_decision.mode);
+    m_f(out, F("gootac_decided_temp_celsius"), F("Last decision: setpoint in Celsius; not commanded when mode index=3."), g_last_decision.temp);
+    m_i(out, F("gootac_sa_mode"), F("Smart-Auto direction memory: -1 uninit, 0 HEAT, 2 COOL, 3 FAN deadband."), g_decision_state.sa_mode);
+    m_u(out, F("gootac_fan_lower_pending_ms"), F("How long a fan step-down has been pending, in ms; 0 when none."), g_decision_state.lower_since ? (uint32_t)(millis() - g_decision_state.lower_since) : 0);
     m_b(out, F("gootac_ac_filter_dirty"),     F("1 if the AC reports the filter needs cleaning, else 0."),          (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0);
     m_b(out, F("gootac_ac_defrost_active"),   F("1 if the AC is defrosting, else 0."),                              (st.statusFlags & HP_STATUS_DEFROST) != 0);
     m_b(out, F("gootac_ac_preheat_active"),   F("1 if the AC is preheating, else 0."),                              (st.statusFlags & HP_STATUS_PREHEAT) != 0);

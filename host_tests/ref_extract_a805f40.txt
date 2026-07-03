@@ -1,0 +1,65 @@
+  bool hpPower = false;
+  uint8_t hpMode = 0; // Library Index: 0:HEAT, 1:DRY, 2:COOL, 3:FAN, 4:AUTO
+  float hpTemp = 21.0;
+
+  // Decision Logic
+  if (dehumidify) {
+    hpPower = true; hpMode = 1; // DRY
+  } else if (target_active) {
+    if (hk_target_mode == 1) { // HEAT
+      hpPower = true; hpMode = 0; hpTemp = heatThr;
+    } else if (hk_target_mode == 2) { // COOL
+      hpPower = true; hpMode = 2; hpTemp = coolThr;
+    } else if (hk_target_mode == 0) { // Smart Auto
+      if (roomTemp > 1.0) {
+        // Hold the current direction until the room crosses back past the
+        // setpoint by MODE_HYST_C, so we don't chatter COOL<->FAN at the edge.
+        static int8_t sa_mode = -1; // -1 uninit; 0=HEAT, 2=COOL, 3=FAN(deadband)
+        if (sa_mode == 2) {
+          if (roomTemp < heatThr) sa_mode = 0;
+          else if (roomTemp < coolThr - MODE_HYST_C) sa_mode = 3;
+        } else if (sa_mode == 0) {
+          if (roomTemp > coolThr) sa_mode = 2;
+          else if (roomTemp > heatThr + MODE_HYST_C) sa_mode = 3;
+        } else {
+          if (roomTemp < heatThr) sa_mode = 0;
+          else if (roomTemp > coolThr) sa_mode = 2;
+          else sa_mode = 3;
+        }
+        hpPower = true;
+        hpMode  = (sa_mode == 0) ? 0 : (sa_mode == 2) ? 2 : 3;
+        hpTemp  = (sa_mode == 0) ? heatThr : coolThr; // ignored when hpMode==3
+      } else {
+        hpPower = true; hpMode = 4; // Native AUTO if room temp unknown
+      }
+    }
+  }
+/* ---- fan block ---- */
+  // --- Fan target: GootAC drives the fan directly. 0 = delegate to unit AUTO. ---
+  uint8_t fan_idx = 0;
+  {
+    bool room_known = (roomTemp > 1.0f);
+    static uint8_t last_fan_idx = 0;
+    static unsigned long lower_since = 0;
+    unsigned long now_ms = millis();
+    if (hpPower && room_known && (hpMode == 2 || hpMode == 0)) {
+      float delta = (hpMode == 2) ? (roomTemp - coolThr) : (heatThr - roomTemp);
+      uint8_t desired = fan_index_for_delta(delta);
+      // Ramp up at once; ease down only after sustained lower demand.
+      if (last_fan_idx < FAN_IDX_MIN || desired > last_fan_idx) {
+        last_fan_idx = desired; lower_since = 0;
+      } else if (desired < last_fan_idx) {
+        if (lower_since == 0) lower_since = now_ms;
+        if (now_ms - lower_since >= FAN_STEP_DOWN_MS) { last_fan_idx = desired; lower_since = 0; }
+      } else {
+        lower_since = 0;
+      }
+      fan_idx = last_fan_idx;
+      g_control_delta_c = delta;
+    } else if (hpPower && room_known && hpMode == 3) {
+      fan_idx = FAN_IDX_MIN; last_fan_idx = FAN_IDX_MIN; lower_since = 0; g_control_delta_c = 0.0f;
+    } else {
+      fan_idx = 0; last_fan_idx = 0; lower_since = 0; g_control_delta_c = 0.0f;
+    }
+    g_fan_target_idx = fan_idx;
+  }
