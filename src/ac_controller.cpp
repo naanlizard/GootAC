@@ -68,12 +68,24 @@ static float   g_control_delta_c = 0.0f;
 // Firmware-driven 2-speed fan. We command the speed directly (rather than the
 // unit's native AUTO, whose ceiling varies by model): SuperPowerful while there
 // is conditioning demand, 50% once the room is well within the comfortable band.
-// FAN_MAP indices: 5 = "4" (max), 3 = "2" (50%). FAN_DEADBAND_C of hysteresis
-// keeps it from chattering between the two.
-constexpr uint8_t FAN_IDX_HIGH   = 5;
-constexpr uint8_t FAN_IDX_LOW    = 3;
-constexpr float   FAN_DEADBAND_C = 1.0f;  // drop to low once this far past setpoint
-static uint8_t g_fan_2speed = FAN_IDX_HIGH; // hysteresis memory across ticks
+// FAN_MAP indices: 5 = "4" (max), 3 = "2" (50%).
+//
+// Two anti-chatter layers, mirroring how ESPHome's thermostat keeps fan timing
+// separate from the (unit-owned) compressor:
+//  - Asymmetric deadband: go HIGH the instant there is demand, but drop to LOW
+//    only once the room is FAN_DEADBAND_C past setpoint, so an ordinary ~1C
+//    wobble never reaches the low leg.
+//  - Min switch time: once at HIGH, hold it at least MIN_FAN_SWITCH_MS before
+//    dropping to LOW, so a brief overshoot inside a burst can't churn the fan
+//    back down. Only the HIGH->LOW drop is gated -- a call for cooling always
+//    ramps to HIGH immediately.
+constexpr uint8_t  FAN_IDX_HIGH      = 5;
+constexpr uint8_t  FAN_IDX_LOW       = 3;
+constexpr float    FAN_DEADBAND_C    = 2.0f;    // drop to low only this far past setpoint
+constexpr uint32_t MIN_FAN_SWITCH_MS = 600000;  // hold HIGH >=10 min before dropping to LOW
+static uint8_t  g_fan_2speed        = FAN_IDX_HIGH; // hysteresis memory across ticks
+static uint8_t  g_fan_prev_idx      = 0;           // last emitted fan_idx, for HIGH-edge detect
+static uint32_t g_fan_high_since_ms = 0;           // millis() when the fan last entered HIGH
 
 // Helper: Calculate checksum for binary integrity
 uint32_t calculate_checksum(TargetState *ts) {
@@ -393,14 +405,20 @@ void update_physical_ac() {
 
   // 2-speed fan. Overrides ac_decide()'s own (now unused) fan-ramp output and
   // uses only the demand delta it computed (control_delta_c: >0 = still needs
-  // conditioning, <0 = past setpoint). MAX while there is demand, LOW once the
-  // room is FAN_DEADBAND_C past setpoint; hold in between (hysteresis).
-  // Idle/DRY/native-AUTO delegate to the unit (index 0).
+  // conditioning, <0 = past setpoint). MAX while there is demand; drop to LOW
+  // only once the room is FAN_DEADBAND_C past setpoint AND MAX has been held for
+  // MIN_FAN_SWITCH_MS. Ramp up to MAX is never gated. Idle/DRY/native-AUTO
+  // delegate to the unit (index 0).
   if (dout.power && (dout.mode == 2 || dout.mode == 0)) { // COOL or HEAT
     float demand = dout.control_delta_c;
-    if (demand >= 0.0f) g_fan_2speed = FAN_IDX_HIGH;
-    else if (demand <= -FAN_DEADBAND_C) g_fan_2speed = FAN_IDX_LOW;
-    // else: within the hysteresis band -> keep g_fan_2speed
+    if (demand >= 0.0f) {
+      g_fan_2speed = FAN_IDX_HIGH;              // demand present -> MAX now, ungated
+    } else if (demand <= -FAN_DEADBAND_C &&
+               g_fan_2speed == FAN_IDX_HIGH &&
+               (uint32_t)(din.now_ms - g_fan_high_since_ms) >= MIN_FAN_SWITCH_MS) {
+      g_fan_2speed = FAN_IDX_LOW;               // well past setpoint & MAX held long enough
+    }
+    // else: within the band, or MAX not yet held long enough -> keep g_fan_2speed
     fan_idx = g_fan_2speed;
   } else if (dout.power && dout.mode == 3) {              // Smart-Auto deadband
     fan_idx = FAN_IDX_LOW;
@@ -409,6 +427,10 @@ void update_physical_ac() {
     fan_idx = 0;
     g_fan_2speed = FAN_IDX_HIGH; // reset so the next active spell starts at MAX
   }
+  // Stamp when the fan (re)enters HIGH so the min-dwell measures time actually
+  // spent at HIGH, not stale time carried over from a prior spell.
+  if (fan_idx == FAN_IDX_HIGH && g_fan_prev_idx != FAN_IDX_HIGH) g_fan_high_since_ms = din.now_ms;
+  g_fan_prev_idx = fan_idx;
   g_fan_target_idx = fan_idx;
 
   // --- Decision Logging (Rationale) ---
