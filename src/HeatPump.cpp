@@ -789,11 +789,10 @@ int HeatPump::readPacket() {
             wideVaneAdj = (data[10] & 0xF0) == 0x80 ? true : false;
 
             if (receivedSettings != currentSettings) {
-              // Fan is delegated to the unit's native AUTO, so the numeric speed
-              // it echoes always differs from our wanted "AUTO". Ignore a
-              // fan-only delta here so the unit's own AUTO fan steps aren't
-              // misread as an external (IR/timer) change -- which would otherwise
-              // spam the log/flash on every step.
+              // Fan is firmware-driven, and some units echo a different fan
+              // token than we command (e.g. "AUTO" vs a numeric). Ignore a
+              // fan-only delta here so our own fan changes -- and that echo
+              // quirk -- aren't misread as an external (IR/timer) change.
               heatpumpSettings wantedCmp = wantedSettings;
               wantedCmp.fan = receivedSettings.fan;
               _externalUpdateOccurred = (receivedSettings != wantedCmp);

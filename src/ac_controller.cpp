@@ -65,6 +65,16 @@ static DecisionOutput g_last_decision;
 static uint8_t g_fan_target_idx = 0;   // last commanded fan index, for /metrics
 static float   g_control_delta_c = 0.0f;
 
+// Firmware-driven 2-speed fan. We command the speed directly (rather than the
+// unit's native AUTO, whose ceiling varies by model): SuperPowerful while there
+// is conditioning demand, 50% once the room is well within the comfortable band.
+// FAN_MAP indices: 5 = "4" (max), 3 = "2" (50%). FAN_DEADBAND_C of hysteresis
+// keeps it from chattering between the two.
+constexpr uint8_t FAN_IDX_HIGH   = 5;
+constexpr uint8_t FAN_IDX_LOW    = 3;
+constexpr float   FAN_DEADBAND_C = 1.0f;  // drop to low once this far past setpoint
+static uint8_t g_fan_2speed = FAN_IDX_HIGH; // hysteresis memory across ticks
+
 // Helper: Calculate checksum for binary integrity
 uint32_t calculate_checksum(TargetState *ts) {
   uint32_t sum = 0;
@@ -381,13 +391,25 @@ void update_physical_ac() {
   float hpTemp = dout.temp;
   uint8_t fan_idx = dout.fan_idx;
 
-  // Delegate the indoor fan to the unit's native AUTO instead of our delta
-  // ramp, fleet-wide. Safe post-1.18: update() no longer re-sends an unchanged
-  // fan each tick (flag-empty SET guard), so native AUTO is not reset every
-  // ~5 s. ac_decide() still computes control_delta for metrics; only its fan
-  // index is overridden here.
-  fan_idx = 0;          // 0 = delegate to unit AUTO
-  g_fan_target_idx = 0; // keep the metric honest about what we command
+  // 2-speed fan. Overrides ac_decide()'s own (now unused) fan-ramp output and
+  // uses only the demand delta it computed (control_delta_c: >0 = still needs
+  // conditioning, <0 = past setpoint). MAX while there is demand, LOW once the
+  // room is FAN_DEADBAND_C past setpoint; hold in between (hysteresis).
+  // Idle/DRY/native-AUTO delegate to the unit (index 0).
+  if (dout.power && (dout.mode == 2 || dout.mode == 0)) { // COOL or HEAT
+    float demand = dout.control_delta_c;
+    if (demand >= 0.0f) g_fan_2speed = FAN_IDX_HIGH;
+    else if (demand <= -FAN_DEADBAND_C) g_fan_2speed = FAN_IDX_LOW;
+    // else: within the hysteresis band -> keep g_fan_2speed
+    fan_idx = g_fan_2speed;
+  } else if (dout.power && dout.mode == 3) {              // Smart-Auto deadband
+    fan_idx = FAN_IDX_LOW;
+    g_fan_2speed = FAN_IDX_LOW;
+  } else {                                                // off / DRY / native AUTO
+    fan_idx = 0;
+    g_fan_2speed = FAN_IDX_HIGH; // reset so the next active spell starts at MAX
+  }
+  g_fan_target_idx = fan_idx;
 
   // --- Decision Logging (Rationale) ---
   char rationale[128] = {0};
@@ -721,13 +743,12 @@ void ac_controller_write_metrics(Print& out) {
     m_b(out, F("gootac_swing_mode"),    F("1 if vane swing is enabled, else 0."),                      currentState.swing_mode != 0);
     m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
     m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_fan_target_idx);
-    m_f(out, F("gootac_control_delta_celsius"), F("How far the room is past the active setpoint on the demand side (>=0); drives the fan ramp. 0 when idle."), g_control_delta_c);
+    m_f(out, F("gootac_control_delta_celsius"), F("Room-vs-setpoint demand delta driving the 2-speed fan: >0 still needs conditioning, <0 past setpoint; 0 when idle."), g_control_delta_c);
     m_b(out, F("gootac_dehumidifier_active"), F("1 if the HomeKit dehumidifier service is targeted on, else 0."), currentState.dehumidifier != 0);
     m_b(out, F("gootac_decided_power"), F("Last decision: 1 if the unit should be powered on."), g_last_decision.power);
     m_i(out, F("gootac_decided_mode_index"), F("Last decision: MODE_MAP index (0 HEAT,1 DRY,2 COOL,3 FAN,4 AUTO); meaningful only when decided power=1."), g_last_decision.mode);
     m_f(out, F("gootac_decided_temp_celsius"), F("Last decision: setpoint in Celsius; not commanded when mode index=3."), g_last_decision.temp);
     m_i(out, F("gootac_sa_mode"), F("Smart-Auto direction memory: -1 uninit, 0 HEAT, 2 COOL, 3 FAN deadband."), g_decision_state.sa_mode);
-    m_u(out, F("gootac_fan_lower_pending_ms"), F("How long a fan step-down has been pending, in ms; 0 when none."), g_decision_state.lower_since ? (uint32_t)(millis() - g_decision_state.lower_since) : 0);
     m_b(out, F("gootac_ac_filter_dirty"),     F("1 if the AC reports the filter needs cleaning, else 0."),          (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0);
     m_b(out, F("gootac_ac_defrost_active"),   F("1 if the AC is defrosting, else 0."),                              (st.statusFlags & HP_STATUS_DEFROST) != 0);
     m_b(out, F("gootac_ac_preheat_active"),   F("1 if the AC is preheating, else 0."),                              (st.statusFlags & HP_STATUS_PREHEAT) != 0);
