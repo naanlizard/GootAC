@@ -381,6 +381,14 @@ void update_physical_ac() {
   float hpTemp = dout.temp;
   uint8_t fan_idx = dout.fan_idx;
 
+  // Delegate the indoor fan to the unit's native AUTO instead of our delta
+  // ramp, fleet-wide. Safe post-1.18: update() no longer re-sends an unchanged
+  // fan each tick (flag-empty SET guard), so native AUTO is not reset every
+  // ~5 s. ac_decide() still computes control_delta for metrics; only its fan
+  // index is overridden here.
+  fan_idx = 0;          // 0 = delegate to unit AUTO
+  g_fan_target_idx = 0; // keep the metric honest about what we command
+
   // --- Decision Logging (Rationale) ---
   char rationale[128] = {0};
   char tempBuf[10];
@@ -538,7 +546,11 @@ void ac_controller_sync_from_ac() {
         hkTargetMode = 2; 
     }
 
-    if (currentState.target_mode != hkTargetMode) {
+    // In Smart-Auto (target_mode 0) the firmware itself drives the physical
+    // HEAT/COOL/FAN mode, so the unit's reported mode is not user intent --
+    // syncing it back would silently drop Smart-Auto to a fixed mode. Only
+    // reflect an external mode change when the user picked a fixed mode.
+    if (currentState.target_mode != 0 && currentState.target_mode != hkTargetMode) {
       currentState.target_mode = hkTargetMode;
       cha_ac_target_state.value.uint8_value = hkTargetMode;
       homekit_characteristic_notify(&cha_ac_target_state,

@@ -789,7 +789,14 @@ int HeatPump::readPacket() {
             wideVaneAdj = (data[10] & 0xF0) == 0x80 ? true : false;
 
             if (receivedSettings != currentSettings) {
-              _externalUpdateOccurred = (receivedSettings != wantedSettings);
+              // Fan is delegated to the unit's native AUTO, so the numeric speed
+              // it echoes always differs from our wanted "AUTO". Ignore a
+              // fan-only delta here so the unit's own AUTO fan steps aren't
+              // misread as an external (IR/timer) change -- which would otherwise
+              // spam the log/flash on every step.
+              heatpumpSettings wantedCmp = wantedSettings;
+              wantedCmp.fan = receivedSettings.fan;
+              _externalUpdateOccurred = (receivedSettings != wantedCmp);
               if (settingsChangedCallback) {
                 GLOG_INFO("MITSUBISHI", "RECV: Settings Changed (%s)",
                           _externalUpdateOccurred ? "Remote/Timer"
