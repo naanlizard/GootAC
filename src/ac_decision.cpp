@@ -1,10 +1,11 @@
 #include "ac_decision.h"
 #include <math.h>
 
-// Exponential airflow: 25% at the setpoint, 100% at FAN_RAMP_SPAN_C. Nearest-step
-// quantization keeps all four levels reachable at the AC's 0.5C temp resolution.
+// Exponential airflow ramp: QUIET at or below setpoint, then 25% just past it up
+// to 100% at FAN_RAMP_SPAN_C. Nearest-step quantization keeps every level
+// reachable at the AC's 0.5C temp resolution.
 uint8_t fan_index_for_delta(float delta) {
-  if (delta < 0.0f) delta = 0.0f;
+  if (delta <= 0.0f) return FAN_IDX_MIN;   // at/below setpoint -> QUIET
   float x = delta / FAN_RAMP_SPAN_C;
   if (x > 1.0f) x = 1.0f;
   int step = (int)lroundf(0.25f * powf(4.0f, x) * 4.0f); // 1..4

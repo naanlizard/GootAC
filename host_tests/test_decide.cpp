@@ -65,6 +65,9 @@ static DecisionInput mkin(bool active, uint8_t mode, float heat, float cool,
 // against git by the Makefile's check-ref target. Mechanical substitutions
 // only: the three function statics became explicit reference parameters,
 // millis() became now_ms_in, and the g_* metric globals became outputs.
+// The fan curve/floor are NOT frozen here: this reference calls the live
+// fan_index_for_delta()/FAN_IDX_MIN, so the sweep verifies the thermal decision
+// and ramp state machine, while independent fan-value checks live in group_a.
 // ---------------------------------------------------------------------------
 static void decide_reference(bool target_active, uint8_t hk_target_mode,
                              float heatThr, float coolThr, bool dehumidify,
@@ -141,10 +144,11 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
 
 // ---------------------------------------------------------------------------
 static void group_a_fan_curve() {
-  // Hand-derived: idx = clamp(lround(0.25*4^(clamp(delta,0,1.5)/1.5)*4),1,4)+1
-  CHECK_EQI(fan_index_for_delta(-1.0f), 2);
-  CHECK_EQI(fan_index_for_delta(0.0f), 2);
-  CHECK_EQI(fan_index_for_delta(0.2f), 2);
+  // At or below setpoint (delta <= 0) the floor is QUIET (FAN_IDX_MIN == 1).
+  // Above setpoint: idx = clamp(lround(0.25*4^(clamp(delta,0,1.5)/1.5)*4),1,4)+1.
+  CHECK_EQI(fan_index_for_delta(-1.0f), 1);   // past setpoint -> QUIET
+  CHECK_EQI(fan_index_for_delta(0.0f), 1);    // exactly at setpoint -> QUIET
+  CHECK_EQI(fan_index_for_delta(0.2f), 2);    // just above -> "1" (25%)
   CHECK_EQI(fan_index_for_delta(0.5f), 3);
   CHECK_EQI(fan_index_for_delta(0.75f), 3);
   CHECK_EQI(fan_index_for_delta(1.0f), 4);
@@ -220,7 +224,7 @@ static void group_b_edge_cases() {
     DecisionOutput o = ac_decide(mkin(true, 2, 18, 30, false, 26.5f, 1000), st);
     CHECK(o.power); CHECK_EQI(o.mode, 2);
     CHECK_EQF(o.control_delta_c, 26.5f - 30.0f); // == -3.5, NOT clamped
-    CHECK_EQI(o.fan_idx, 2);                     // ramp floor via clamp inside curve
+    CHECK_EQI(o.fan_idx, 1);                     // past setpoint -> QUIET floor
   }
   // Smart-Auto deadband (uninit): FAN mode, temp carries coolThr (ignored by
   // the caller when mode==3 — pinned here so nobody "cleans it up").
@@ -331,6 +335,22 @@ static void group_d_ramp_timing() {
     CHECK_EQI(st.lower_since, 59999);
     DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 25.5f, 119999), st);
     CHECK_EQI(o.fan_idx, 3); // drops only 60s after the RE-arm
+  }
+  // Easing all the way down to the QUIET floor: high demand, then hold the room
+  // at/below setpoint (delta <= 0 -> desired QUIET(1)) past the step-down window.
+  // Exercises the new floor through the real ramp path, not just the bare curve.
+  {
+    DecisionState st;
+    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 26.5f, 1000), st); // fan 5
+    CHECK_EQI(o.fan_idx, 5);
+    o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 2000), st);   // delta -0.5, arm @2000
+    CHECK_EQI(o.fan_idx, 5); CHECK_EQI(st.lower_since, 2000);
+    o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 61999), st);  // still holding
+    CHECK_EQI(o.fan_idx, 5);
+    o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 62000), st);  // 60s up -> QUIET
+    CHECK_EQI(o.fan_idx, 1); CHECK_EQI(st.last_fan_idx, 1); CHECK_EQI(st.lower_since, 0);
+    o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 63000), st);  // holds at QUIET
+    CHECK_EQI(o.fan_idx, 1);
   }
 }
 

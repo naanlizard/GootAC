@@ -12,7 +12,7 @@
 
 // Fan/mode tuning. FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4"
 // (25/50/75/100%).
-constexpr uint8_t  FAN_IDX_MIN      = 2;      // 25% floor while actively conditioning
+constexpr uint8_t  FAN_IDX_MIN      = 1;      // QUIET floor at/below setpoint and in the deadband
 constexpr float    FAN_RAMP_SPAN_C  = 1.5f;   // room-vs-setpoint delta at which fan hits 100%
 constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing fan down
 constexpr float    MODE_HYST_C      = 0.5f;   // Smart-Auto COOL/HEAT release hysteresis
