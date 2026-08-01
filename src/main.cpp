@@ -18,6 +18,7 @@ extern "C" {
 }
 #include "ac_controller.h"
 #include "fs_logger.h"
+#include "hk_log_bridge.h"
 #include "homekit_ac.h"
 #include <ArduinoLog.h>
 #include <ArduinoOTA.h>
@@ -148,6 +149,19 @@ String getUptimeString() {
 }
 
 void setup_webserver() {
+#ifdef GOOTAC_HK_LOG
+  server.on("/hklog", HTTP_GET, []() {
+    const char *a, *b;
+    size_t alen, blen;
+    hk_log_segments(&a, &alen, &b, &blen);
+    server.setContentLength(alen + blen);
+    server.send(200, "text/plain", "");
+    if (alen) server.sendContent(a, alen);
+    if (blen) server.sendContent(b, blen);
+    if (server.hasArg("clear")) hk_log_clear();
+  });
+#endif
+
   server.on("/log", HTTP_GET, []() {
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
     server.send(200, "text/plain", ""); // Start chunked response

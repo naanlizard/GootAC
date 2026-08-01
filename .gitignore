@@ -27,3 +27,8 @@ __pycache__/
 
 # Logs
 *.log
+
+# Host test binaries and objects
+host_tests/test_decide
+host_tests/storage/test_storage
+host_tests/storage/*.o
