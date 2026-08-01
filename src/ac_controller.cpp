@@ -115,6 +115,28 @@ static void apply_default_target_state() {
   currentState.dehumidifier = 0;
 }
 
+// Restored and migrated state reaches ac_decide() without passing through any
+// HomeKit setter, so the threshold guard never sees it. Firmware before 1.32
+// enforced no gap at all (its guard assigned each threshold to itself), so a
+// fielded unit can be holding an inverted or sub-2.0C pair right now, and an
+// inverted pair alternates HEAT/COOL on every tick with the room stationary.
+// Repair on the way in. Neither stored value is trusted, so an inverted pair is
+// reordered rather than resolved in favour of one side.
+static void sanitize_loaded_thresholds() {
+  float heat = currentState.heating_threshold;
+  float cool = currentState.cooling_threshold;
+  if (!normalize_thresholds(heat, cool, *cha_ac_heating_threshold.min_value,
+                            *cha_ac_cooling_threshold.max_value, THRESHOLD_UNTRUSTED))
+    return;
+  char cBuf[10], hBuf[10];
+  dtostrf(cool, 1, 1, cBuf);
+  dtostrf(heat, 1, 1, hBuf);
+  GLOG_WARN("SYS", "Stored thresholds unusable; repaired to C: %s, H: %s", cBuf, hBuf);
+  currentState.heating_threshold = heat;
+  currentState.cooling_threshold = cool;
+  save_target_state();
+}
+
 // Legacy on-disk layout from v1.11/v1.12 (before fan controls were removed
 // from HK). Kept here so v1.13 can migrate existing user-set thresholds
 // instead of silently reverting them to defaults on first boot.
@@ -143,6 +165,7 @@ static bool try_migrate_legacy_v12(File &f) {
   currentState.heating_threshold = legacy.heating_threshold;
   currentState.swing_mode = legacy.swing_mode;
   currentState.dehumidifier = legacy.dehumidifier;
+  sanitize_loaded_thresholds();   // legacy admits 10-40C, unordered
   char cBuf[10], hBuf[10];
   dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
   dtostrf(currentState.heating_threshold, 1, 1, hBuf);
@@ -174,6 +197,7 @@ void load_target_state() {
       dtostrf(currentState.heating_threshold, 1, 1, hBuf);
       GLOG_INFO("SYS", "Target State loaded successfully (Active: %d, Mode: %d, C: %s, H: %s)",
                 currentState.active, currentState.target_mode, cBuf, hBuf);
+      sanitize_loaded_thresholds();
       return;
     }
     GLOG_WARN("SYS", "Target State checksum mismatch; applying defaults");
@@ -190,14 +214,41 @@ void load_target_state() {
   save_target_state();
 }
 
+// Set when the guard has overridden a value a client wrote. The per-client event
+// queue is LIFO and the flush loop coalesces by overwriting with each successive
+// pop, so within one batch the OLDEST queued value is the one delivered — and
+// the client's own value is already queued by the time the guard runs. Re-send
+// from the loop instead, which lands in a later batch and therefore wins.
+static bool pending_threshold_renotify = false;
+
+// Hold the pair inside the declared characteristic range and at least
+// THRESHOLD_MIN_GAP_C apart, moving the threshold the caller did NOT just set so
+// their write is the one that survives. See normalize_thresholds().
+static void enforce_threshold_gap(ThresholdAuthority who) {
+  float heat = cha_ac_heating_threshold.value.float_value;
+  float cool = cha_ac_cooling_threshold.value.float_value;
+  if (!normalize_thresholds(heat, cool, *cha_ac_heating_threshold.min_value,
+                            *cha_ac_cooling_threshold.max_value, who))
+    return;
+
+  char heatBuf[10], coolBuf[10];
+  dtostrf(heat, 1, 1, heatBuf);
+  dtostrf(cool, 1, 1, coolBuf);
+  GLOG_TRACE("MITSUBISHI", "Threshold Gap Guard: %s / %s", heatBuf, coolBuf);
+
+  cha_ac_heating_threshold.value.float_value = heat;
+  currentState.heating_threshold = heat;
+  cha_ac_cooling_threshold.value.float_value = cool;
+  currentState.cooling_threshold = cool;
+  pending_threshold_renotify = true;
+}
+
 static bool pending_update = false;
 static bool pending_sync_request = false;
 
 // Timing and guards
 static unsigned long lastSetTime = 0;
 static unsigned long lastInteractionTime = 0;
-static unsigned long lastHeatPushTime = 0;
-static unsigned long lastCoolPushTime = 0;
 static bool identify_active = false;
 static unsigned long identify_start = 0;
 
@@ -231,34 +282,21 @@ void set_ac_target_state(homekit_value_t value) {
 
 void set_ac_cooling_threshold(homekit_value_t value) {
   if (value.format != homekit_format_float) return;
-  unsigned long now = millis();
-  if (now - lastHeatPushTime < 1000) return;
 
   cha_ac_cooling_threshold.value = value;
   currentState.cooling_threshold = value.float_value;
-  
+
   char tempBuf[10];
   dtostrf(value.float_value, 1, 1, tempBuf);
   HKLOG_INFO("Characteristic Set Cooling Threshold -> %s", tempBuf);
   homekit_characteristic_notify(&cha_ac_cooling_threshold, cha_ac_cooling_threshold.value);
 
-  float min_gap = 1.0;
-  if (value.float_value < cha_ac_heating_threshold.value.float_value + min_gap) {
-    char tempBuf[10];
-    dtostrf(cha_ac_heating_threshold.value.float_value, 1, 1, tempBuf);
-    GLOG_TRACE("MITSUBISHI", "Threshold Gap Guard: Pushing Heating Threshold down to %s", tempBuf);
-    
-    currentState.heating_threshold = cha_ac_heating_threshold.value.float_value;
-    lastCoolPushTime = now;
-    homekit_characteristic_notify(&cha_ac_heating_threshold, cha_ac_heating_threshold.value);
-  }
+  enforce_threshold_gap(THRESHOLD_FROM_COOL_WRITE);
   update_state("HomeKit Cooling Threshold change");
 }
 
 void set_ac_heating_threshold(homekit_value_t value) {
   if (value.format != homekit_format_float) return;
-  unsigned long now = millis();
-  if (now - lastCoolPushTime < 1000) return;
 
   cha_ac_heating_threshold.value = value;
   currentState.heating_threshold = value.float_value;
@@ -268,16 +306,7 @@ void set_ac_heating_threshold(homekit_value_t value) {
   HKLOG_INFO("Characteristic Set Heating Threshold -> %s", tempBuf);
   homekit_characteristic_notify(&cha_ac_heating_threshold, cha_ac_heating_threshold.value);
 
-  float min_gap = 1.0;
-  if (value.float_value > cha_ac_cooling_threshold.value.float_value - min_gap) {
-    char tempBuf[10];
-    dtostrf(cha_ac_cooling_threshold.value.float_value, 1, 1, tempBuf);
-    GLOG_TRACE("MITSUBISHI", "Threshold Gap Guard: Pushing Cooling Threshold up to %s", tempBuf);
-
-    currentState.cooling_threshold = cha_ac_cooling_threshold.value.float_value;
-    lastHeatPushTime = now;
-    homekit_characteristic_notify(&cha_ac_cooling_threshold, cha_ac_cooling_threshold.value);
-  }
+  enforce_threshold_gap(THRESHOLD_FROM_HEAT_WRITE);
   update_state("HomeKit Heating Threshold change");
 }
 
@@ -468,6 +497,14 @@ void update_physical_ac() {
 void ac_controller_loop() {
   arduino_homekit_loop();
   yield();
+
+  // Deferred so it lands after the server's own post-setter notify, which
+  // carries the value the client wrote rather than the corrected one.
+  if (pending_threshold_renotify) {
+    pending_threshold_renotify = false;
+    homekit_characteristic_notify(&cha_ac_heating_threshold, cha_ac_heating_threshold.value);
+    homekit_characteristic_notify(&cha_ac_cooling_threshold, cha_ac_cooling_threshold.value);
+  }
 
   unsigned long now = millis();
   static unsigned long lastUpdate = 0;
