@@ -536,7 +536,6 @@ static void group_h_pull_table() {
   //  8.0    2.0   fraction (2.00), on grid
   // 12.0+   2.0   AUTO_PULL_MAX_C cap
   static const Row rows[] = {
-    {20.0f, 22.0f, 1.0f, 21.0f, 21.0f},
     {20.0f, 23.0f, 1.0f, 21.0f, 22.0f},
     {20.0f, 24.0f, 1.0f, 21.0f, 23.0f},
     {19.0f, 24.0f, 1.5f, 20.5f, 22.5f},
@@ -553,6 +552,9 @@ static void group_h_pull_table() {
     {16.5f, 24.0f, 2.0f, 18.5f, 22.0f},   // 7.5 -> 1.875 rounds up
     // Below the setters' minimum gap. Unreachable from HomeKit, kept because the
     // core must stay stable if a stored state or a future caller supplies one.
+    // 2.0 is the width where both targets collapse onto the midpoint, which is
+    // why THRESHOLD_MIN_GAP_C sits above it.
+    {20.0f, 22.0f, 1.0f, 21.0f, 21.0f},
     {20.0f, 21.0f, 0.5f, 20.5f, 20.5f},
     {20.0f, 20.5f, 0.0f, 20.0f, 20.5f},
     {25.0f, 25.0f, 0.0f, 25.0f, 25.0f},
@@ -563,11 +565,12 @@ static void group_h_pull_table() {
     CHECK_EQF(auto_cool_target(r.heat, r.cool), r.cool_target);
   }
 
-  // Never park on the midpoint of a range wide enough to have one. At 2.0C both
-  // targets ARE the midpoint and there is nowhere else for them to go, so the
-  // property starts above it.
-  for (float heat = 16.0f; heat <= 28.0f; heat += 0.5f)
-    for (float cool = heat + 2.5f; cool <= 31.0f; cool += 0.5f) {
+  // No range the setters permit parks on its own midpoint. Coincidence needs
+  // pull == range/2, which cannot happen at or above THRESHOLD_MIN_GAP_C: the
+  // pull floors at 1.0 while half the range is already 1.5. (At 2.0C, below the
+  // minimum, both targets ARE the midpoint — see the degenerate rows above.)
+  for (float heat = 5.0f; heat <= 40.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
+    for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 40.0f; cool += 0.5f) {
       const float mid = 0.5f * (heat + cool);
       CHECK(auto_cool_target(heat, cool) > mid);
       CHECK(auto_heat_target(heat, cool) < mid);
@@ -578,9 +581,9 @@ static void group_h_pull_table() {
   // thresholds, so the bound the AC cares about is enforced by whoever supplies
   // the thresholds — normalize_thresholds() below, not this function. Feeding it
   // an out-of-band pair really does produce an out-of-band setpoint.
-  const float grid_lo = 16.0f, grid_hi = 31.0f;   // characteristic min/max
-  CHECK_EQF(auto_cool_target(12.0f, 40.0f), 38.0f);
-  CHECK_EQF(auto_heat_target(10.0f, 12.0f), 11.0f);
+  const float grid_lo = 5.0f, grid_hi = 40.0f;   // characteristic min/max
+  CHECK_EQF(auto_cool_target(2.0f, 50.0f), 48.0f);
+  CHECK_EQF(auto_heat_target(0.0f, 2.0f), 1.0f);
   for (float heat = grid_lo; heat <= grid_hi; heat += 0.5f)
     for (float cool = heat; cool <= grid_hi; cool += 0.5f) {
       const float ct = auto_cool_target(heat, cool);
@@ -596,7 +599,8 @@ static void group_h_pull_table() {
 // pair makes ac_decide alternate HEAT/COOL on every tick with the room
 // stationary, so this is checked first as a live failure, then as a repair.
 static void group_k_normalize() {
-  const float LO = 16.0f, HI = 31.0f;
+  const float LO = 5.0f, HI = 40.0f;   // characteristic min/max
+  CHECK(HI - LO >= THRESHOLD_MIN_GAP_C);   // precondition the function assumes
 
   // The failure being defended against: inverted thresholds, room held still.
   {
@@ -616,32 +620,35 @@ static void group_k_normalize() {
     {18.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 18.0f, 24.0f, false},
     {18.0f, 24.0f, THRESHOLD_FROM_COOL_WRITE, 18.0f, 24.0f, false},
     {18.0f, 24.0f, THRESHOLD_UNTRUSTED,       18.0f, 24.0f, false},
-    {16.0f, 18.0f, THRESHOLD_FROM_HEAT_WRITE, 16.0f, 18.0f, false},  // exactly the gap
+    {5.0f,  8.0f,  THRESHOLD_FROM_HEAT_WRITE, 5.0f,  8.0f,  false},  // exactly the gap
     // Too narrow: the value the caller did NOT write is the one that moves.
-    {20.0f, 21.0f, THRESHOLD_FROM_HEAT_WRITE, 20.0f, 22.0f, true},
-    {20.0f, 21.0f, THRESHOLD_FROM_COOL_WRITE, 19.0f, 21.0f, true},
-    {22.0f, 22.0f, THRESHOLD_FROM_HEAT_WRITE, 22.0f, 24.0f, true},
+    {20.0f, 21.0f, THRESHOLD_FROM_HEAT_WRITE, 20.0f, 23.0f, true},
+    {20.0f, 21.0f, THRESHOLD_FROM_COOL_WRITE, 18.0f, 21.0f, true},
+    {22.0f, 22.0f, THRESHOLD_FROM_HEAT_WRITE, 22.0f, 25.0f, true},
     // Too narrow AND against a bound: only then does the written value give way.
-    {16.0f, 17.0f, THRESHOLD_FROM_COOL_WRITE, 16.0f, 18.0f, true},
-    {30.0f, 31.0f, THRESHOLD_FROM_HEAT_WRITE, 29.0f, 31.0f, true},
+    {5.0f,  6.0f,  THRESHOLD_FROM_COOL_WRITE, 5.0f,  8.0f,  true},
+    {39.0f, 40.0f, THRESHOLD_FROM_HEAT_WRITE, 37.0f, 40.0f, true},
     // Inverted by a write. The written value MUST survive: swapping here would
     // land it on the other characteristic, so writing cool=17 over 25/27 would
     // silently become heat=17. Resolve by moving the untouched value instead.
-    {25.0f, 17.0f, THRESHOLD_FROM_COOL_WRITE, 16.0f, 18.0f, true},
-    {25.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 25.0f, 27.0f, true},
-    {30.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 29.0f, 31.0f, true},
-    {22.0f, 19.0f, THRESHOLD_FROM_COOL_WRITE, 17.0f, 19.0f, true},
+    {25.0f, 17.0f, THRESHOLD_FROM_COOL_WRITE, 14.0f, 17.0f, true},
+    {25.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 25.0f, 28.0f, true},
+    {39.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 37.0f, 40.0f, true},
+    {22.0f, 19.0f, THRESHOLD_FROM_COOL_WRITE, 16.0f, 19.0f, true},
     // Inverted in restored state: neither value is trusted, so reorder.
     {25.0f, 20.0f, THRESHOLD_UNTRUSTED, 20.0f, 25.0f, true},
-    {24.0f, 23.0f, THRESHOLD_UNTRUSTED, 23.0f, 25.0f, true},
+    {24.0f, 23.0f, THRESHOLD_UNTRUSTED, 23.0f, 26.0f, true},
     {28.0f, 24.0f, THRESHOLD_UNTRUSTED, 24.0f, 28.0f, true},
     // Reorder first even for a one-step inversion, so the repaired range sits
-    // where the stored values were rather than 2.0C above them.
-    {24.0f, 23.5f, THRESHOLD_UNTRUSTED, 23.5f, 25.5f, true},
-    // Outside the characteristic band entirely (the legacy 10-40 migration).
-    {10.0f, 40.0f, THRESHOLD_UNTRUSTED, 16.0f, 31.0f, true},
-    {12.0f, 12.5f, THRESHOLD_UNTRUSTED, 16.0f, 18.0f, true},
-    {35.0f, 38.0f, THRESHOLD_UNTRUSTED, 29.0f, 31.0f, true},
+    // where the stored values were rather than a whole gap above them.
+    {24.0f, 23.5f, THRESHOLD_UNTRUSTED, 23.5f, 26.5f, true},
+    // Outside the characteristic band entirely (the legacy 10-40 migration
+    // admits values this wide, and pre-1.33 flash holds pairs set under the
+    // old 16-31 declaration).
+    {0.0f,  50.0f, THRESHOLD_UNTRUSTED, 5.0f,  40.0f, true},
+    {12.0f, 12.5f, THRESHOLD_UNTRUSTED, 12.0f, 15.0f, true},
+    {2.0f,  3.0f,  THRESHOLD_UNTRUSTED, 5.0f,  8.0f,  true},
+    {45.0f, 48.0f, THRESHOLD_UNTRUSTED, 37.0f, 40.0f, true},
   };
   for (const Row &r : rows) {
     float h = r.in_h, c = r.in_c;
@@ -681,8 +688,8 @@ static void group_k_normalize() {
   static const ThresholdAuthority whos[] = {THRESHOLD_FROM_HEAT_WRITE,
                                             THRESHOLD_FROM_COOL_WRITE,
                                             THRESHOLD_UNTRUSTED};
-  for (float h = 10.0f; h <= 40.0f; h += 0.5f)
-    for (float c = 10.0f; c <= 40.0f; c += 0.5f)
+  for (float h = 0.0f; h <= 50.0f; h += 0.5f)
+    for (float c = 0.0f; c <= 50.0f; c += 0.5f)
       for (ThresholdAuthority w : whos) {
         float nh = h, nc = c;
         normalize_thresholds(nh, nc, LO, HI, w);
@@ -731,8 +738,8 @@ static void group_i_auto_fan_ramp() {
 // released below the heating threshold, HEAT fired, and the unit reversed
 // forever. Walk a simulated room across every range the core can see.
 static void group_j_no_reversal() {
-  for (float heat = 16.0f; heat <= 30.0f; heat += 0.5f)
-    for (float cool = heat; cool <= 31.0f; cool += 0.5f) {
+  for (float heat = 5.0f; heat <= 39.0f; heat += 0.5f)
+    for (float cool = heat; cool <= 40.0f; cool += 0.5f) {
       // Enter COOL from above, then run until the mode changes.
       DecisionState st; st.sa_mode = 2;
       float room = cool + 2.0f;
@@ -763,8 +770,8 @@ static void group_j_no_reversal() {
   // drags a threshold past the room, without passing through the idle band. The
   // walk above can never reach this: it always meets its own target, which is
   // inside the range, before it can cross the far threshold.
-  for (float heat = 16.0f; heat <= 29.0f; heat += 0.5f)
-    for (float cool = heat + 2.0f; cool <= 31.0f; cool += 0.5f) {
+  for (float heat = 5.0f; heat <= 40.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
+    for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 40.0f; cool += 0.5f) {
       // Cooling, then the heating threshold is raised above the room.
       DecisionState st; st.sa_mode = 2;
       DecisionOutput o = ac_decide(mkin(true, 0, heat, cool, false, heat - 0.5f, 10000), st);

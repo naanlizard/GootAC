@@ -118,7 +118,7 @@ static void apply_default_target_state() {
 // Restored and migrated state reaches ac_decide() without passing through any
 // HomeKit setter, so the threshold guard never sees it. Firmware before 1.32
 // enforced no gap at all (its guard assigned each threshold to itself), so a
-// fielded unit can be holding an inverted or sub-2.0C pair right now, and an
+// fielded unit can be holding an inverted or sub-gap pair right now, and an
 // inverted pair alternates HEAT/COOL on every tick with the room stationary.
 // Repair on the way in. Neither stored value is trusted, so an inverted pair is
 // reordered rather than resolved in favour of one side.

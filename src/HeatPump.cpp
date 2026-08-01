@@ -314,9 +314,11 @@ void HeatPump::setTemperature(float setting) {
   // Quantize/clamp to the unit's grid before the no-op guard so repeated
   // calls with the same raw (possibly off-grid) value are true no-ops.
   if (!tempMode) {
-    setting = lookupByteMapIndex(TEMP_MAP, 16, (int)(setting + 0.5)) > -1
-                  ? setting
-                  : TEMP_MAP[0];
+    // TEMP_MAP is the protocol's whole vocabulary here: 31 down to 16 in 1C
+    // steps. Anything outside it used to fall through to TEMP_MAP[0], so a
+    // request for 7C commanded 31C. Clamp to the nearer end instead.
+    if (lookupByteMapIndex(TEMP_MAP, 16, (int)(setting + 0.5)) < 0)
+      setting = setting < TEMP_MAP[15] ? TEMP_MAP[15] : TEMP_MAP[0];
   } else {
     setting = round(setting * 2) / 2;
     setting = setting < 10 ? 10 : (setting > 31 ? 31 : setting);

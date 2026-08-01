@@ -36,14 +36,16 @@ float auto_cool_target(float heat_threshold, float cool_threshold);  // cool - p
 float auto_heat_target(float heat_threshold, float cool_threshold);  // heat + pull
 
 // Smallest Auto range the rest of the firmware may present to ac_decide(). At
-// 2.0C the pull reaches AUTO_PULL_MIN_C, so each call still drives a full degree
-// in. The decision core does NOT defend itself against narrower or inverted
+// 3.0C the pull reaches AUTO_PULL_MIN_C without also hitting the half-range cap,
+// so the two targets stay 1.0C apart instead of collapsing onto the midpoint,
+// which they do at exactly 2.0C. The decision core does NOT defend itself
+// against narrower or inverted
 // pairs: an inverted pair satisfies both entry tests at once and alternates
 // HEAT/COOL on every tick with the room stationary, which is a mode-change
 // packet to the AC every tick. Every path that can put a threshold pair in front
 // of ac_decide() — HomeKit writes, restored flash state, legacy migration — must
 // run it through normalize_thresholds() first.
-constexpr float THRESHOLD_MIN_GAP_C = 2.0f;
+constexpr float THRESHOLD_MIN_GAP_C = 3.0f;
 
 // Which value, if either, the caller must not move.
 enum ThresholdAuthority : uint8_t {
