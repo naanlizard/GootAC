@@ -16,6 +16,10 @@ constexpr uint8_t  FAN_IDX_MIN      = 1;      // QUIET floor at/below setpoint a
 constexpr float    FAN_RAMP_SPAN_C  = 1.5f;   // room-vs-setpoint delta at which fan hits 100%
 constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing fan down
 constexpr float    MODE_HYST_C      = 0.5f;   // Smart-Auto COOL/HEAT release hysteresis
+// DRY runs only this far above the heating threshold. DRY cools, and the
+// deadband-to-HEAT transition has no release margin, so without this standoff
+// dehumidifying would drive the room into a HEAT call and oscillate.
+constexpr float    DRY_MARGIN_C     = 1.0f;
 
 struct DecisionInput {
   bool     active;          // currentState.active == 1

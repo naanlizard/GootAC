@@ -27,9 +27,7 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
   out.control_delta_c = 0.0f;
 
   // Decision Logic
-  if (in.dehumidify) {
-    out.power = true; out.mode = 1; // DRY
-  } else if (in.active) {
+  if (in.active) {
     if (in.target_mode == 1) { // HEAT
       out.power = true; out.mode = 0; out.temp = in.heat_threshold;
     } else if (in.target_mode == 2) { // COOL
@@ -49,13 +47,23 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
           else if (in.room_temp > in.cool_threshold) state.sa_mode = 2;
           else state.sa_mode = 3;
         }
+        // Dehumidify replaces the deadband's FAN, but only above
+        // heat_threshold + DRY_MARGIN_C: DRY cools, and the deadband-to-HEAT
+        // edge above has no release margin, so running it lower would pull the
+        // room into a HEAT call and cycle.
+        const bool dry_ok = in.dehumidify &&
+                            in.room_temp >= in.heat_threshold + DRY_MARGIN_C;
         out.power = true;
-        out.mode  = (state.sa_mode == 0) ? 0 : (state.sa_mode == 2) ? 2 : 3;
-        out.temp  = (state.sa_mode == 0) ? in.heat_threshold : in.cool_threshold; // ignored when mode==3
+        out.mode  = (state.sa_mode == 0) ? 0
+                  : (state.sa_mode == 2) ? 2
+                  : (dry_ok ? 1 : 3);
+        out.temp  = (state.sa_mode == 0) ? in.heat_threshold : in.cool_threshold; // ignored when mode==3 or 1
       } else {
         out.power = true; out.mode = 4; // Native AUTO if room temp unknown
       }
     }
+  } else if (in.dehumidify) {
+    out.power = true; out.mode = 1; // standalone DRY while the accessory is off
   }
 
   // --- Fan target: GootAC drives the fan directly. 0 = delegate to unit AUTO. ---

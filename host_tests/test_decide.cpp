@@ -362,8 +362,11 @@ static void group_e_oracle_sweep() {
   const uint32_t times[][2] = {{0, 1000}, {5000, 64999}, {5000, 65000}, {5000, 70000}};
   long cases = 0, mismatches = 0;
 
+  // deh stays 0: dehumidify now deliberately diverges from the a805f40 oracle,
+  // and its behaviour is pinned by group_g instead. The sweep keeps guarding
+  // the thermal decision and fan ramp, which are unchanged.
   for (int act = 0; act <= 1; act++)
-   for (int deh = 0; deh <= 1; deh++)
+   for (int deh = 0; deh <= 0; deh++)
     for (uint8_t tm = 0; tm <= 2; tm++)
      for (int ri = 0; ri < 5 + 81; ri++) {
        float room = ri < 5 ? rooms_fixed[ri] : 15.0f + 0.25f * (ri - 5);
@@ -420,6 +423,64 @@ static void group_f_determinism() {
   CHECK_EQF(oa.control_delta_c, 24.7f - 25.0f);
 }
 
+// Group G - dehumidify as an idle-mode toggle. Deliberately diverges from the
+// a805f40 oracle, which let dehumidify pre-empt every other input. DRY now
+// replaces the Smart-Auto deadband, gated to the cooling side so it cannot pull
+// the room down into a HEAT call, and still runs standalone when off.
+static DecisionOutput dec1(bool active, uint8_t mode, float heat, float cool,
+                           bool dehum, float room, int8_t sa_in = 3) {
+  DecisionState st;
+  st.sa_mode = sa_in;
+  DecisionInput in = mkin(active, mode, heat, cool, dehum, room, 10000);
+  return ac_decide(in, st);
+}
+
+static void group_g_dehumidify_toggle() {
+  // Off plus armed keeps standalone dehumidification, fan left to the unit.
+  DecisionOutput o = dec1(false, 0, 18, 24, true, 22.0f);
+  CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
+  o = dec1(false, 0, 18, 24, false, 22.0f);
+  CHECK(!o.power);
+
+  // Smart-Auto deadband, cooling side: DRY replaces FAN.
+  o = dec1(true, 0, 18, 24, true, 22.0f);
+  CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
+  o = dec1(true, 0, 18, 24, false, 22.0f);
+  CHECK_EQI(o.mode, 3); CHECK_EQI(o.fan_idx, FAN_IDX_MIN);
+
+  // Margin boundary: DRY at heat+margin, FAN just below it.
+  o = dec1(true, 0, 18, 24, true, 18.0f + DRY_MARGIN_C);
+  CHECK_EQI(o.mode, 1);
+  o = dec1(true, 0, 18, 24, true, 18.0f + DRY_MARGIN_C - 0.1f);
+  CHECK_EQI(o.mode, 3);
+
+  // Active conditioning is never displaced by the toggle.
+  o = dec1(true, 0, 18, 24, true, 25.0f, 2);
+  CHECK_EQI(o.mode, 2);
+  o = dec1(true, 0, 18, 24, true, 17.0f, 0);
+  CHECK_EQI(o.mode, 0);
+  o = dec1(true, 1, 18, 24, true, 22.0f);
+  CHECK_EQI(o.mode, 0);
+  o = dec1(true, 2, 18, 24, true, 22.0f);
+  CHECK_EQI(o.mode, 2);
+
+  // Room unknown has no deadband to gate on, so native AUTO stands.
+  o = dec1(true, 0, 18, 24, true, 0.5f);
+  CHECK_EQI(o.mode, 4);
+
+  // Descending sweep must never produce DRY -> HEAT -> DRY.
+  DecisionState st; st.sa_mode = 2;
+  int prev = -1; bool cycled = false, heat_after_dry = false;
+  for (float room = 24.5f; room >= 17.0f; room -= 0.25f) {
+    DecisionInput in = mkin(true, 0, 18, 24, true, room, 10000);
+    DecisionOutput s = ac_decide(in, st);
+    if (prev == 1 && s.mode == 0) heat_after_dry = true;
+    if (heat_after_dry && s.mode == 1) cycled = true;
+    prev = s.mode;
+  }
+  CHECK(!cycled);
+}
+
 int main() {
   group_a_fan_curve();
   group_b_edge_cases();
@@ -427,6 +488,7 @@ int main() {
   group_d_ramp_timing();
   group_e_oracle_sweep();
   group_f_determinism();
+  group_g_dehumidify_toggle();
   printf("%d checks, %d failures\n", g_checks, g_fails);
   return g_fails ? 1 : 0;
 }

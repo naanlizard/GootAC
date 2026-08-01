@@ -218,14 +218,6 @@ void set_ac_active(homekit_value_t value) {
   currentState.active = value.uint8_value;
   HKLOG_INFO("Characteristic Set Active -> %d", value.uint8_value);
 
-  if (value.uint8_value == 1) {
-    if (cha_dehumidifier_active.value.uint8_value == 1) {
-      GLOG_TRACE("HOMEKIT", "Auto-disabling Dehumidifier to prevent mode conflict");
-      cha_dehumidifier_active.value.uint8_value = 0;
-      currentState.dehumidifier = 0;
-      homekit_characteristic_notify(&cha_dehumidifier_active, cha_dehumidifier_active.value);
-    }
-  }
   update_state("HomeKit Active change");
 }
 
@@ -302,14 +294,6 @@ void set_dehumidifier_active(homekit_value_t value) {
   currentState.dehumidifier = value.uint8_value;
   HKLOG_INFO("Characteristic Set Dehumidifier Active -> %u", value.uint8_value);
 
-  if (value.uint8_value == 1) {
-    if (cha_ac_active.value.uint8_value == 1) {
-      GLOG_TRACE("HOMEKIT", "Auto-disabling HeaterCooler to prevent mode conflict");
-      cha_ac_active.value.uint8_value = 0;
-      currentState.active = 0;
-      homekit_characteristic_notify(&cha_ac_active, cha_ac_active.value);
-    }
-  }
   update_state("HomeKit Dehumidifier Active change");
 }
 
@@ -394,10 +378,9 @@ void update_physical_ac() {
   char rationale[128] = {0};
   char tempBuf[10];
   
-  if (dehumidify) {
-    strncpy_P(rationale, PSTR("Logic: Dehumidifier ACTIVE -> DRY"), sizeof(rationale)-1);
-  } else if (!target_active) {
-    strncpy_P(rationale, PSTR("Logic: Target OFF"), sizeof(rationale)-1);
+  if (!target_active) {
+    strncpy_P(rationale, dehumidify ? PSTR("Logic: Target OFF, dehumidifying")
+                                    : PSTR("Logic: Target OFF"), sizeof(rationale)-1);
   } else if (hk_target_mode == 1) { // HEAT
     dtostrf(hpTemp, 1, 1, tempBuf);
     snprintf_P(rationale, sizeof(rationale), PSTR("Logic: HEAT mode (Target %sC)"), tempBuf);
@@ -406,7 +389,10 @@ void update_physical_ac() {
     snprintf_P(rationale, sizeof(rationale), PSTR("Logic: COOL mode (Target %sC)"), tempBuf);
   } else {
     dtostrf(roomTemp, 1, 1, tempBuf);
-    snprintf_P(rationale, sizeof(rationale), PSTR("Logic: Smart Auto decision based on Room %sC"), tempBuf);
+    snprintf_P(rationale, sizeof(rationale),
+               hpMode == 1 ? PSTR("Logic: Smart Auto dehumidifying, Room %sC")
+                           : PSTR("Logic: Smart Auto decision based on Room %sC"),
+               tempBuf);
   }
 
   static char lastRationale[128] = {0};
@@ -456,7 +442,9 @@ void update_physical_ac() {
     
     // Temp: the library quantizes to the unit's grid; treat as changed only
     // if wantedSettings moved (raw-vs-quantized compares re-fire forever).
-    if (hpMode != 3) {
+    // FAN and DRY carry no setpoint. Without the DRY case the untouched
+    // DecisionOutput default of 21.0 is written on every entry into DRY.
+    if (hpMode != 3 && hpMode != 1) {
       hp->setTemperature(hpTemp);
       float newTemp = hp->getWantedSettings().temperature;
       if (newTemp != wanted.temperature) {
