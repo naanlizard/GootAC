@@ -64,33 +64,12 @@ static DecisionInput mkin(bool active, uint8_t mode, float heat, float cool,
 }
 
 // ---------------------------------------------------------------------------
-// Reference implementation for the oracle sweep (Group E).
-// Derived from `git show a805f40:src/ac_controller.cpp` lines 375-410 and
-// 437-464; raw extraction stored in ref_extract_a805f40.txt and re-diffed
-// against git by the Makefile's check-ref target. Mechanical substitutions
-// only: the three function statics became explicit reference parameters,
-// millis() became now_ms_in, and the g_* metric globals became outputs.
-// The fan curve/floor are NOT frozen here: this reference calls the live
-// fan_index_for_delta()/FAN_IDX_MIN, so the sweep verifies the thermal decision
-// and ramp state machine, while independent fan-value checks live in group_a.
+// Frozen reference for the oracle sweep, extracted from a805f40 into
+// ref_extract_a805f40.txt and re-checked by the Makefile's check-ref target.
 //
-// Smart Auto's *decision* is deliberately absent: its targets and release points
-// no longer resemble a805f40, and a reference that called the live
-// auto_*_target() would be checking those functions against themselves. group_c,
-// group_g and group_h pin the decision with literal expected values instead.
-//
-// The fan block below is still swept under Smart Auto, because it is the only
-// frozen model of the step-down state machine. To avoid the circularity, the
-// caller hands in the decision the live core produced rather than recomputing
-// it: the sweep checks the ramp GIVEN a decision, never the decision. So for
-// Smart Auto rows the power/mode/temp/sa_mode comparisons carry no information
-// and are skipped; groups B/C/G/H/I/J are what pin those.
-//
-// One line of the fan block is NOT verbatim a805f40: the delta expression takes
-// hpTemp rather than the raw thresholds, matching the change under review. That
-// is a no-op for explicit modes, where hpTemp IS the threshold. ref_extract_
-// a805f40.txt still holds the original, and check-ref re-extracts from git
-// rather than diffing this function, so it does not flag the difference.
+// Smart Auto's decision is absent; `live` supplies it. Recomputing it would
+// check auto_*_target() against itself, so only the ramp outputs mean anything
+// for tm 0. The delta expression takes hpTemp, so it differs from the extract.
 // ---------------------------------------------------------------------------
 static void decide_reference(bool target_active, uint8_t hk_target_mode,
                              float heatThr, float coolThr, bool dehumidify,
@@ -389,9 +368,8 @@ static void group_e_oracle_sweep() {
   const uint32_t times[][2] = {{0, 1000}, {5000, 64999}, {5000, 65000}, {5000, 70000}};
   long cases = 0, mismatches = 0;
 
-  // deh stays 0: dehumidify now deliberately diverges from the a805f40 oracle
-  // and is pinned by group_g instead. tm 0 IS swept, but only through the fan
-  // block — see the note on decide_reference.
+  // deh stays 0: dehumidify diverges from the oracle and group_g pins it. tm 0
+  // is swept, but only through the fan block; see the decide_reference note.
   for (int act = 0; act <= 1; act++)
    for (int deh = 0; deh <= 0; deh++)
     for (uint8_t tm = 0; tm <= 2; tm++)
@@ -532,21 +510,12 @@ static void group_g_dehumidify_toggle() {
   CHECK_EQI(seen[3], 0);   // never FAN while armed
 }
 
-// Group H - where Smart Auto drives the room, as a function of range width.
-// Every expected value here is a literal. Nothing in this group may call
-// auto_pull_c()/auto_*_target() to compute what it then asserts, or the table
-// stops being a specification and becomes a restatement of the code.
+// Group H - where Smart Auto drives the room, by range width. Every expected
+// value is a literal; computing them here would restate the code, not pin it.
 static void group_h_pull_table() {
   struct Row { float heat, cool, pull, heat_target, cool_target; };
-  // range  pull                       reason
-  //  2.0    1.0   AUTO_PULL_MIN_C floor, also capped at half the range
-  //  3.0    1.0   AUTO_PULL_MIN_C floor
-  //  4.0    1.0   fraction (1.00), on grid
-  //  5.0    1.5   fraction (1.25) -> nearest 0.5
-  //  6.0    1.5   fraction (1.50), on grid
-  //  7.0    2.0   fraction (1.75) -> nearest 0.5
-  //  8.0    2.0   fraction (2.00), on grid
-  // 12.0+   2.0   AUTO_PULL_MAX_C cap
+  // Widths up to 4.5 take the AUTO_PULL_MIN_C floor, 5.0 to 6.5 the fraction
+  // snapped to the grid, 7.0 and above the AUTO_PULL_MAX_C cap.
   static const Row rows[] = {
     {20.0f, 23.0f, 1.0f, 21.0f, 22.0f},
     {20.0f, 24.0f, 1.0f, 21.0f, 23.0f},
@@ -577,10 +546,8 @@ static void group_h_pull_table() {
     CHECK_EQF(auto_cool_target(r.heat, r.cool), r.cool_target);
   }
 
-  // No range the setters permit parks on its own midpoint. Coincidence needs
-  // pull == range/2, which cannot happen at or above THRESHOLD_MIN_GAP_C: the
-  // pull floors at 1.0 while half the range is already 1.5. (At 2.0C, below the
-  // minimum, both targets ARE the midpoint — see the degenerate rows above.)
+  // No permitted range parks on its own midpoint: that needs pull == range/2,
+  // impossible at or above the gap, where pull floors at 1.0 and half is 1.5.
   for (float heat = 5.0f; heat <= 40.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
     for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 40.0f; cool += 0.5f) {
       const float mid = 0.5f * (heat + cool);
@@ -588,11 +555,8 @@ static void group_h_pull_table() {
       CHECK(auto_heat_target(heat, cool) < mid);
     }
 
-  // Structural invariants over every threshold pair the core can be handed.
-  // The targets are only guaranteed commandable because they stay between the
-  // thresholds, so the bound the AC cares about is enforced by whoever supplies
-  // the thresholds — normalize_thresholds() below, not this function. Feeding it
-  // an out-of-band pair really does produce an out-of-band setpoint.
+  // Targets are commandable only because they stay between the thresholds; the
+  // band itself is normalize_thresholds()'s job, not this function's.
   const float grid_lo = 5.0f, grid_hi = 40.0f;   // characteristic min/max
   CHECK_EQF(auto_cool_target(2.0f, 50.0f), 48.0f);
   CHECK_EQF(auto_heat_target(0.0f, 2.0f), 1.0f);
@@ -606,10 +570,8 @@ static void group_h_pull_table() {
     }
 }
 
-// Group K - normalize_thresholds() is the only thing standing between a restored
-// flash pair and a decision core that has no defences of its own. An inverted
-// pair makes ac_decide alternate HEAT/COOL on every tick with the room
-// stationary, so this is checked first as a live failure, then as a repair.
+// Group K - normalize_thresholds() is all that stands between a restored flash
+// pair and a core with no defences. Checked as a live failure, then as a repair.
 static void group_k_normalize() {
   const float LO = 5.0f, HI = 40.0f;   // characteristic min/max
   CHECK(HI - LO >= THRESHOLD_MIN_GAP_C);   // precondition the function assumes
@@ -640,9 +602,8 @@ static void group_k_normalize() {
     // Too narrow AND against a bound: only then does the written value give way.
     {5.0f,  6.0f,  THRESHOLD_FROM_COOL_WRITE, 5.0f,  8.0f,  true},
     {39.0f, 40.0f, THRESHOLD_FROM_HEAT_WRITE, 37.0f, 40.0f, true},
-    // Inverted by a write. The written value MUST survive: swapping here would
-    // land it on the other characteristic, so writing cool=17 over 25/27 would
-    // silently become heat=17. Resolve by moving the untouched value instead.
+    // The written value must survive: a swap would land it on the other
+    // characteristic, turning cool=17 over 25/27 into heat=17.
     {25.0f, 17.0f, THRESHOLD_FROM_COOL_WRITE, 14.0f, 17.0f, true},
     {25.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 25.0f, 28.0f, true},
     {39.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 37.0f, 40.0f, true},
@@ -651,12 +612,9 @@ static void group_k_normalize() {
     {25.0f, 20.0f, THRESHOLD_UNTRUSTED, 20.0f, 25.0f, true},
     {24.0f, 23.0f, THRESHOLD_UNTRUSTED, 23.0f, 26.0f, true},
     {28.0f, 24.0f, THRESHOLD_UNTRUSTED, 24.0f, 28.0f, true},
-    // Reorder first even for a one-step inversion, so the repaired range sits
-    // where the stored values were rather than a whole gap above them.
+    // Reorder even a one-step inversion, so the range stays where it was.
     {24.0f, 23.5f, THRESHOLD_UNTRUSTED, 23.5f, 26.5f, true},
-    // Outside the characteristic band entirely (the legacy 10-40 migration
-    // admits values this wide, and pre-1.33 flash holds pairs set under the
-    // old 16-31 declaration).
+    // Outside the band; the legacy v1.12 migration admits 10-40C.
     {0.0f,  50.0f, THRESHOLD_UNTRUSTED, 5.0f,  40.0f, true},
     {12.0f, 12.5f, THRESHOLD_UNTRUSTED, 12.0f, 15.0f, true},
     {2.0f,  3.0f,  THRESHOLD_UNTRUSTED, 5.0f,  8.0f,  true},
@@ -682,9 +640,8 @@ static void group_k_normalize() {
         CHECK(h == v || v > HI - THRESHOLD_MIN_GAP_C);
       }
 
-  // Non-finite input cannot reach ac_decide: NaN makes every comparison false,
-  // which pins sa_mode and commands a NaN setpoint. Only the corrupt half is
-  // replaced; the other may still be exactly what the user set.
+  // NaN makes every comparison false, pinning sa_mode and commanding a NaN
+  // setpoint. Only the corrupt half is replaced.
   {
     float h = NAN, c = 24.0f;
     CHECK(normalize_thresholds(h, c, LO, HI, THRESHOLD_UNTRUSTED));
@@ -714,14 +671,11 @@ static void group_k_normalize() {
       }
 }
 
-// Group I - the fan ramp must stay multi-level inside Smart Auto. Measuring
-// demand against a point the call never reaches truncates the ramp to its top
-// rung; measuring it against the release target keeps the rungs reachable.
+// Group I - the ramp must stay multi-level inside Smart Auto; measuring demand
+// against a point the call never reaches truncates it to the top rung.
 static void group_i_auto_fan_ramp() {
-  // heat 18 / cool 24 -> cool target 22.5. Fresh state each tick so the 60s
-  // step-down dwell does not mask which index the curve actually asks for.
-  // Descending, cool target 22.5. Every rung appears, which is what the 3.0
-  // span buys: delta 3.0/2.5/1.5/0.5 -> 100/75/50/25%, then the floor.
+  // heat 18 / cool 24 -> cool target 22.5. Fresh state per row so the 60s
+  // step-down dwell does not mask which index the curve asks for.
   struct { float room; uint8_t mode, fan; } expect[] = {
     {25.5f, 2, 5}, {25.0f, 2, 4}, {24.5f, 2, 4}, {24.0f, 2, 3},
     {23.5f, 2, 3}, {23.0f, 2, 2},
@@ -754,10 +708,8 @@ static void group_i_auto_fan_ramp() {
   for (int i = 1; i <= 5; i++) CHECK(seen[i]);
 }
 
-// Group J - a call must always end in the idle band, never in the opposite
-// call. This is the property the previous version broke on narrow ranges: COOL
-// released below the heating threshold, HEAT fired, and the unit reversed
-// forever. Walk a simulated room across every range the core can see.
+// Group J - a call must end in the idle band, never in the opposite call, or
+// the unit reverses forever. Walks a room across every range the core can see.
 static void group_j_no_reversal() {
   for (float heat = 5.0f; heat <= 39.0f; heat += 0.5f)
     for (float cool = heat; cool <= 40.0f; cool += 0.5f) {
@@ -787,10 +739,8 @@ static void group_j_no_reversal() {
       CHECK_EQI(st2.sa_mode, 3);
     }
 
-  // A running call must also yield DIRECTLY to the opposite call when the user
-  // drags a threshold past the room, without passing through the idle band. The
-  // walk above can never reach this: it always meets its own target, which is
-  // inside the range, before it can cross the far threshold.
+  // A running call must yield DIRECTLY to the opposite one when a threshold is
+  // dragged past the room. The walk above always meets its target first.
   for (float heat = 5.0f; heat <= 40.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
     for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 40.0f; cool += 0.5f) {
       // Cooling, then the heating threshold is raised above the room.

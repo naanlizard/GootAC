@@ -8,10 +8,8 @@ float auto_pull_c(float heat_threshold, float cool_threshold) {
   if (pull < AUTO_PULL_MIN_C) pull = AUTO_PULL_MIN_C;
   if (pull > AUTO_PULL_MAX_C) pull = AUTO_PULL_MAX_C;
   pull = SENSOR_STEP_C * roundf(pull / SENSOR_STEP_C);
-  // Never let the two targets cross. Past half the range the COOL target sits
-  // below the HEAT target, so releasing one call lands inside the other and the
-  // unit reverses instead of idling. Floor to the grid so the cap itself is a
-  // temperature the sensor can actually report.
+  // Past half the range the targets cross, so releasing one call lands inside
+  // the other and the unit reverses instead of idling. Floored onto the grid.
   const float half = SENSOR_STEP_C * floorf((range * 0.5f) / SENSOR_STEP_C);
   if (pull > half) pull = half;
   return pull;
@@ -21,8 +19,7 @@ bool normalize_thresholds(float &heat, float &cool, float lo, float hi,
                           ThresholdAuthority who) {
   const float in_h = heat, in_c = cool;
 
-  // Replace each independently: one corrupt value is no reason to discard the
-  // other, which may still be exactly what the user set.
+  // Independently: one corrupt value is no reason to discard the other.
   if (!isfinite(heat)) heat = lo;
   if (!isfinite(cool)) cool = hi;
 
@@ -52,10 +49,8 @@ float auto_heat_target(float heat_threshold, float cool_threshold) {
   return heat_threshold + auto_pull_c(heat_threshold, cool_threshold);
 }
 
-// Exponential airflow ramp: QUIET at or below setpoint, then 25% just past it up
-// to 100% at FAN_RAMP_SPAN_C. On the 0.5C grid the room and the setpoint share,
-// the span of 3.0 puts every index in reach: delta 0 -> QUIET, 0.5 -> 25%,
-// 1.0/1.5 -> 50%, 2.0/2.5 -> 75%, 3.0 and beyond -> 100%.
+// Exponential ramp, QUIET at or below setpoint to 100% at FAN_RAMP_SPAN_C.
+// On the 0.5C grid: 0.5 -> 25%, 1.0/1.5 -> 50%, 2.0/2.5 -> 75%, 3.0 -> 100%.
 uint8_t fan_index_for_delta(float delta) {
   if (delta <= 0.0f) return FAN_IDX_MIN;   // at/below setpoint -> QUIET
   float x = delta / FAN_RAMP_SPAN_C;
@@ -66,10 +61,6 @@ uint8_t fan_index_for_delta(float delta) {
   return (uint8_t)(step + 1);                            // 2..5
 }
 
-// Transplanted verbatim from update_physical_ac() at a805f40 (decision core
-// :375-410, fan block :437-464). Only mechanical renames: locals -> out.*,
-// statics -> state.*, millis() -> in.now_ms. Comparison literals unchanged
-// (`> 1.0` in the Smart-Auto branch vs `> 1.0f` in the fan block — as found).
 DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
   DecisionOutput out;
   out.power = false;
@@ -88,11 +79,8 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
       if (in.room_temp > 1.0) {
         const float cool_target = auto_cool_target(in.heat_threshold, in.cool_threshold);
         const float heat_target = auto_heat_target(in.heat_threshold, in.cool_threshold);
-        // A call starts when the room leaves the range and ends when it reaches
-        // that call's target, which sits auto_pull_c() inside the range. The
-        // release test is inclusive: the room arrives ON the target, since both
-        // it and the sensor live on the same 0.5C grid, so a strict comparison
-        // would hold the call for one more step past the point it aimed at.
+        // Release is inclusive: target and sensor share the 0.5C grid, so the
+        // room lands ON the target and a strict test would overshoot one step.
         if (state.sa_mode == 2) {
           if (in.room_temp < in.heat_threshold) state.sa_mode = 0;
           else if (in.room_temp <= cool_target) state.sa_mode = 3;
@@ -104,9 +92,8 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
           else if (in.room_temp > in.cool_threshold) state.sa_mode = 2;
           else state.sa_mode = 3;
         }
-        // Idle band: dehumidify whenever neither call is running, otherwise
-        // circulate. No floor, so DRY covers the whole band; it may cool the
-        // room into a HEAT call, which then hands back once satisfied.
+        // DRY covers the whole idle band with no floor, so it may cool the room
+        // into a HEAT call; that hands back once satisfied and is intended.
         out.power = true;
         out.mode  = (state.sa_mode == 0) ? 0
                   : (state.sa_mode == 2) ? 2
@@ -125,9 +112,8 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
   {
     bool room_known = (in.room_temp > 1.0f);
     if (out.power && room_known && (out.mode == 2 || out.mode == 0)) {
-      // Demand is the distance to the commanded setpoint. In Smart Auto that
-      // setpoint is also the release point, so the ramp reaches its bottom rung
-      // exactly as the call ends instead of being cut off part way down.
+      // Against the commanded setpoint, which in Smart Auto is also the release
+      // point, so the ramp reaches its bottom rung exactly as the call ends.
       float delta = (out.mode == 2) ? (in.room_temp - out.temp)
                                     : (out.temp - in.room_temp);
       uint8_t desired = fan_index_for_delta(delta);

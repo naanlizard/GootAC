@@ -65,12 +65,7 @@ static DecisionOutput g_last_decision;
 static uint8_t g_fan_target_idx = 0;   // last commanded fan index, for /metrics
 static float   g_control_delta_c = 0.0f;
 
-// The indoor fan is driven directly by ac_decide()'s multi-level ramp
-// (fan_index_for_delta): QUIET at/below setpoint, ramping through "1".."4"
-// (25/50/75/100%) up to 100% at FAN_RAMP_SPAN_C past setpoint. Ramp-up is
-// immediate; a drop waits FAN_STEP_DOWN_MS of sustained lower demand. The
-// smart-auto deadband runs QUIET; off/DRY/room-unknown delegate to the unit's
-// native AUTO (index 0). See src/ac_decision.cpp.
+// The indoor fan is driven directly by ac_decide(); see src/ac_decision.cpp.
 
 // Helper: Calculate checksum for binary integrity
 uint32_t calculate_checksum(TargetState *ts) {
@@ -115,13 +110,8 @@ static void apply_default_target_state() {
   currentState.dehumidifier = 0;
 }
 
-// Restored and migrated state reaches ac_decide() without passing through any
-// HomeKit setter, so the threshold guard never sees it. Firmware before 1.32
-// enforced no gap at all (its guard assigned each threshold to itself), so a
-// fielded unit can be holding an inverted or sub-gap pair right now, and an
-// inverted pair alternates HEAT/COOL on every tick with the room stationary.
-// Repair on the way in. Neither stored value is trusted, so an inverted pair is
-// reordered rather than resolved in favour of one side.
+// Restored and migrated state reaches ac_decide() without passing through a
+// HomeKit setter, so this is the only thing holding the gap on that path.
 static void sanitize_loaded_thresholds() {
   float heat = currentState.heating_threshold;
   float cool = currentState.cooling_threshold;
@@ -214,16 +204,10 @@ void load_target_state() {
   save_target_state();
 }
 
-// Set when the guard has overridden a value a client wrote. The per-client event
-// queue is LIFO and the flush loop coalesces by overwriting with each successive
-// pop, so within one batch the OLDEST queued value is the one delivered — and
-// the client's own value is already queued by the time the guard runs. Re-send
-// from the loop instead, which lands in a later batch and therefore wins.
+// The per-client event queue coalesces oldest-wins within a batch, and the
+// client's own value is already queued here, so a correction must go out later.
 static bool pending_threshold_renotify = false;
 
-// Hold the pair inside the declared characteristic range and at least
-// THRESHOLD_MIN_GAP_C apart, moving the threshold the caller did NOT just set so
-// their write is the one that survives. See normalize_thresholds().
 static void enforce_threshold_gap(ThresholdAuthority who) {
   float heat = cha_ac_heating_threshold.value.float_value;
   float cool = cha_ac_cooling_threshold.value.float_value;
@@ -498,8 +482,7 @@ void ac_controller_loop() {
   arduino_homekit_loop();
   yield();
 
-  // Deferred so it lands after the server's own post-setter notify, which
-  // carries the value the client wrote rather than the corrected one.
+  // After the server's own post-setter notify, which carries the client's value.
   if (pending_threshold_renotify) {
     pending_threshold_renotify = false;
     homekit_characteristic_notify(&cha_ac_heating_threshold, cha_ac_heating_threshold.value);

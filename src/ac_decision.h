@@ -1,73 +1,41 @@
 #pragma once
 #include <stdint.h>
 
-// Pure decision core: given HomeKit-targeted state, the room temperature, and
-// cross-tick memory, compute what the physical AC should be told (power, mode,
-// setpoint, fan index). No Arduino/HeatPump/HomeKit dependencies, so both
-// PlatformIO envs and the host harness (host_tests/) compile it.
-// Transplanted verbatim from update_physical_ac() at commit a805f40.
-//
-// The identify override, vane/swing handling, all change detection, and
-// command dispatch stay in ac_controller.cpp — this function only decides.
+// Pure decision core: HomeKit-targeted state plus room temperature in, what to
+// tell the AC out. No Arduino/HeatPump/HomeKit deps, so host_tests/ compiles it.
 
-// Fan/mode tuning. FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4"
-// (25/50/75/100%).
-constexpr uint8_t  FAN_IDX_MIN      = 1;      // QUIET floor at/below setpoint and in the deadband
-// Room-vs-setpoint delta at which the fan hits 100%. 3.0 rather than 1.5 so all
-// five speeds are reachable on the sensor's 0.5C grid: at 1.5 the 25% rung spanned
-// delta 0 to ~0.44 and nothing ever landed in it. It also keeps 100% for a real
-// 3C excursion, where before any call starting at or beyond its threshold was
-// already saturated, since AUTO_PULL_MAX_C alone is 2.0.
+// FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4" (25/50/75/100%).
+constexpr uint8_t  FAN_IDX_MIN      = 1;
+// Below about 1.71 the 25% rung falls entirely between points of the 0.5C grid
+// that the room reading and the setpoint share, so it can never be commanded.
 constexpr float    FAN_RAMP_SPAN_C  = 3.0f;
-constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing fan down
+constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing down
 constexpr float    SENSOR_STEP_C    = 0.5f;   // CN105 reports room temp in 0.5C steps
 
-// How far past the threshold that called it Smart Auto drives the room, as a
-// fraction of the Auto range, clamped and snapped to the sensor grid. A fraction
-// keeps a wide range from conditioning to its midpoint and a narrow one from
-// barely moving; the cap stops a very wide range from running the compressor for
-// hours to reach a point nobody asked for.
+// How far past the calling threshold Smart Auto drives, as a fraction of the
+// range, clamped so a narrow range still moves and a wide one does not overshoot.
 constexpr float    AUTO_PULL_FRAC   = 0.25f;
 constexpr float    AUTO_PULL_MIN_C  = 1.0f;
 constexpr float    AUTO_PULL_MAX_C  = 2.0f;
 
-// Smart Auto's per-call target. This single point is BOTH the commanded setpoint
-// and the release threshold: the mode hands back to the idle band exactly when
-// the room reaches it. Splitting the two is what made the previous version
-// misbehave — the release fired above the setpoint, so the commanded value never
-// governed where the room landed and the fan ramp lost its bottom rungs.
+// The target is both the commanded setpoint and the release point: the call ends
+// exactly when the room reaches it. Separating them costs the ramp its low rungs.
 float auto_pull_c(float heat_threshold, float cool_threshold);
 float auto_cool_target(float heat_threshold, float cool_threshold);  // cool - pull
 float auto_heat_target(float heat_threshold, float cool_threshold);  // heat + pull
 
-// Smallest Auto range the rest of the firmware may present to ac_decide(). At
-// 3.0C the pull reaches AUTO_PULL_MIN_C without also hitting the half-range cap,
-// so the two targets stay 1.0C apart instead of collapsing onto the midpoint,
-// which they do at exactly 2.0C. The decision core does NOT defend itself
-// against narrower or inverted
-// pairs: an inverted pair satisfies both entry tests at once and alternates
-// HEAT/COOL on every tick with the room stationary, which is a mode-change
-// packet to the AC every tick. Every path that can put a threshold pair in front
-// of ac_decide() — HomeKit writes, restored flash state, legacy migration — must
-// run it through normalize_thresholds() first.
+// ac_decide has no defence of its own: an inverted pair trips both entry tests
+// and flips HEAT/COOL every tick, so every caller must normalize first.
 constexpr float THRESHOLD_MIN_GAP_C = 3.0f;
 
-// Which value, if either, the caller must not move.
 enum ThresholdAuthority : uint8_t {
-  THRESHOLD_FROM_HEAT_WRITE = 0,  // the heating threshold was just written
-  THRESHOLD_FROM_COOL_WRITE = 1,  // the cooling threshold was just written
-  THRESHOLD_UNTRUSTED       = 2,  // restored or migrated state; neither is trusted
+  THRESHOLD_FROM_HEAT_WRITE = 0,
+  THRESHOLD_FROM_COOL_WRITE = 1,
+  THRESHOLD_UNTRUSTED       = 2,  // restored/migrated state; neither value trusted
 };
 
-// Force `heat`/`cool` into [lo, hi] and at least THRESHOLD_MIN_GAP_C apart, in
-// place, and replace non-finite values. Returns true if either moved. Idempotent,
-// so re-running it on its own output is a no-op. Assumes hi - lo >= the gap.
-//
-// Only THRESHOLD_UNTRUSTED reorders an inverted pair. On the two write paths a
-// swap would move the value the client just set onto the OTHER characteristic
-// — writing cool=17 over a 25/27 pair would silently become heat=17 — so there
-// an inversion is treated as an extreme case of "too narrow" and resolved by
-// moving the value the client did not touch.
+// Assumes hi - lo >= THRESHOLD_MIN_GAP_C. Only UNTRUSTED reorders an inversion:
+// on a write path a swap moves the client's value onto the other characteristic.
 bool normalize_thresholds(float &heat, float &cool, float lo, float hi,
                           ThresholdAuthority who);
 
@@ -81,25 +49,21 @@ struct DecisionInput {
   uint32_t now_ms;          // caller passes millis(); uint32_t matches ESP8266 wrap
 };
 
-// Cross-tick memory (previously function-local statics). Read-modify-write by
-// ac_decide(); reset only at boot. One instance lives in ac_controller.cpp;
-// tests own their instances. Default init matches the old statics exactly.
+// Cross-tick memory. Reset only at boot.
 struct DecisionState {
-  int8_t   sa_mode      = -1; // -1 uninit; 0=HEAT, 2=COOL, 3=FAN/DRY(idle band)
+  int8_t   sa_mode      = -1; // -1 uninit; 0=HEAT, 2=COOL, 3=idle band
   uint8_t  last_fan_idx = 0;  // FAN_MAP index of last ramp-commanded fan
   uint32_t lower_since  = 0;  // 0 = no step-down pending
 };
 
-// What the unit should be told, in library-index domain.
-// When power == false, mode/temp keep their defaults (0 / 21.0) and are
-// don't-cares: the caller's `if (hpPower)` gate is load-bearing — it is what
-// prevents commanding mode/temp to an off unit, exactly as at a805f40.
+// When power == false, mode/temp are don't-cares; the caller's `if (hpPower)`
+// gate is what stops them being commanded to an off unit.
 struct DecisionOutput {
   bool    power;
   uint8_t mode;             // MODE_MAP index: 0 HEAT, 1 DRY, 2 COOL, 3 FAN, 4 AUTO
-  float   temp;             // default 21.0; caller skips setTemperature when mode==3
+  float   temp;             // caller skips setTemperature when mode is 3 or 1
   uint8_t fan_idx;          // FAN_MAP index; 0 = delegate to unit AUTO
-  float   control_delta_c;  // raw demand delta — CAN be negative (preserved)
+  float   control_delta_c;  // demand delta; negative is preserved, not clamped
 };
 
 uint8_t fan_index_for_delta(float delta);

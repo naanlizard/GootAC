@@ -27,10 +27,8 @@ homekit_characteristic_t cha_ac_active = HOMEKIT_CHARACTERISTIC_(ACTIVE, 0);
 homekit_characteristic_t cha_ac_current_state = HOMEKIT_CHARACTERISTIC_(CURRENT_HEATER_COOLER_STATE, 0);
 homekit_characteristic_t cha_ac_target_state = HOMEKIT_CHARACTERISTIC_(TARGET_HEATER_COOLER_STATE, 0);
 homekit_characteristic_t cha_ac_current_temp = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 22.0, .min_value = (float[]) {MIN_VALID_ROOM_TEMP_C}, .max_value = (float[]) {MAX_VALID_ROOM_TEMP_C});
-// 5-40C is wider than both the HAP defaults for these characteristics (cooling
-// 10-35, heating 0-25) and the 16-31C the CN105 wire protocol can carry, so the
-// ends of each slider are a deadband setting rather than a commandable setpoint:
-// HeatPump::setTemperature clamps whatever ac_decide asks for back into 16-31.
+// Wider than both the HAP defaults (cooling 10-35, heating 0-25) and the 16-31C
+// the CN105 carries; the ends set an idle band, they are not commandable.
 homekit_characteristic_t cha_ac_cooling_threshold = HOMEKIT_CHARACTERISTIC_(COOLING_THRESHOLD_TEMPERATURE, 24.0, .min_value = (float[]) {5}, .max_value = (float[]) {40});
 homekit_characteristic_t cha_ac_heating_threshold = HOMEKIT_CHARACTERISTIC_(HEATING_THRESHOLD_TEMPERATURE, 18.0, .min_value = (float[]) {5}, .max_value = (float[]) {40});
 homekit_characteristic_t cha_ac_swing_mode = HOMEKIT_CHARACTERISTIC_(SWING_MODE, 0);
@@ -110,5 +108,7 @@ homekit_server_config_t config = {
     //         after iOS rendered the controls poorly
     //   6 = v1.18 — fan characteristics removed again; must exceed the 4/5
     //       schemas cached by the canary's paired controller
+    //   7 = v1.33: threshold min/max widened from 16-31 to 5-40. Nothing added
+    //       or removed, but iOS caches the declared range as part of the schema
     .config_number = 7
 };

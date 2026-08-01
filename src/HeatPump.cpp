@@ -314,9 +314,8 @@ void HeatPump::setTemperature(float setting) {
   // Quantize/clamp to the unit's grid before the no-op guard so repeated
   // calls with the same raw (possibly off-grid) value are true no-ops.
   if (!tempMode) {
-    // TEMP_MAP is the protocol's whole vocabulary here: 31 down to 16 in 1C
-    // steps. Anything outside it used to fall through to TEMP_MAP[0], so a
-    // request for 7C commanded 31C. Clamp to the nearer end instead.
+    // TEMP_MAP is the protocol's whole vocabulary here, 16 to 31C in 1C steps,
+    // and the HomeKit thresholds range wider than that.
     if (lookupByteMapIndex(TEMP_MAP, 16, (int)(setting + 0.5)) < 0)
       setting = setting < TEMP_MAP[15] ? TEMP_MAP[15] : TEMP_MAP[0];
   } else {
