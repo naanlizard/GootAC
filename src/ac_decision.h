@@ -13,7 +13,12 @@
 // Fan/mode tuning. FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4"
 // (25/50/75/100%).
 constexpr uint8_t  FAN_IDX_MIN      = 1;      // QUIET floor at/below setpoint and in the deadband
-constexpr float    FAN_RAMP_SPAN_C  = 1.5f;   // room-vs-setpoint delta at which fan hits 100%
+// Room-vs-setpoint delta at which the fan hits 100%. 3.0 rather than 1.5 so all
+// five speeds are reachable on the sensor's 0.5C grid: at 1.5 the 25% rung spanned
+// delta 0 to ~0.44 and nothing ever landed in it. It also keeps 100% for a real
+// 3C excursion, where before any call starting at or beyond its threshold was
+// already saturated, since AUTO_PULL_MAX_C alone is 2.0.
+constexpr float    FAN_RAMP_SPAN_C  = 3.0f;
 constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing fan down
 constexpr float    SENSOR_STEP_C    = 0.5f;   // CN105 reports room temp in 0.5C steps
 

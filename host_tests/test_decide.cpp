@@ -155,17 +155,29 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
 // ---------------------------------------------------------------------------
 static void group_a_fan_curve() {
   // At or below setpoint (delta <= 0) the floor is QUIET (FAN_IDX_MIN == 1).
-  // Above setpoint: idx = clamp(lround(0.25*4^(clamp(delta,0,1.5)/1.5)*4),1,4)+1.
+  // Above setpoint: idx = clamp(lround(0.25*4^(clamp(delta,0,3.0)/3.0)*4),1,4)+1.
+  // Rung boundaries sit where lround crosses .5, i.e. 4^(delta/3) == 1.5/2.5/3.5.
   CHECK_EQI(fan_index_for_delta(-1.0f), 1);   // past setpoint -> QUIET
   CHECK_EQI(fan_index_for_delta(0.0f), 1);    // exactly at setpoint -> QUIET
-  CHECK_EQI(fan_index_for_delta(0.2f), 2);    // just above -> "1" (25%)
-  CHECK_EQI(fan_index_for_delta(0.5f), 3);
-  CHECK_EQI(fan_index_for_delta(0.75f), 3);
-  CHECK_EQI(fan_index_for_delta(1.0f), 4);
-  CHECK_EQI(fan_index_for_delta(1.30f), 4); // idx-5 boundary is ~1.356
-  CHECK_EQI(fan_index_for_delta(1.40f), 5);
-  CHECK_EQI(fan_index_for_delta(1.5f), 5);
+  CHECK_EQI(fan_index_for_delta(0.5f), 2);    // 25%, on the grid the sensor uses
+  CHECK_EQI(fan_index_for_delta(0.85f), 2);   // idx-3 boundary is ~0.877
+  CHECK_EQI(fan_index_for_delta(0.90f), 3);
+  CHECK_EQI(fan_index_for_delta(1.0f), 3);
+  CHECK_EQI(fan_index_for_delta(1.5f), 3);
+  CHECK_EQI(fan_index_for_delta(1.95f), 3);   // idx-4 boundary is ~1.983
+  CHECK_EQI(fan_index_for_delta(2.0f), 4);
+  CHECK_EQI(fan_index_for_delta(2.5f), 4);
+  CHECK_EQI(fan_index_for_delta(2.70f), 4);   // idx-5 boundary is ~2.711
+  CHECK_EQI(fan_index_for_delta(2.75f), 5);
+  CHECK_EQI(fan_index_for_delta(3.0f), 5);
   CHECK_EQI(fan_index_for_delta(99.0f), 5);
+
+  // Every rung is reachable once room and setpoint share the 0.5C grid, which
+  // is the point of the 3.0 span: at 1.5 the 25% rung spanned 0 to ~0.44 and
+  // nothing landed in it.
+  bool seen[6] = {false, false, false, false, false, false};
+  for (float d = 0.0f; d <= 6.0f; d += 0.5f) seen[fan_index_for_delta(d)] = true;
+  for (int i = 1; i <= 5; i++) CHECK(seen[i]);
 }
 
 static void group_b_edge_cases() {
@@ -219,7 +231,7 @@ static void group_b_edge_cases() {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(true, 2, 18, 25, false, 26.5f, 1000), st);
     CHECK(o.power); CHECK_EQI(o.mode, 2); CHECK_EQF(o.temp, 25.0f);
-    CHECK_EQF(o.control_delta_c, 26.5f - 25.0f); CHECK_EQI(o.fan_idx, 5);
+    CHECK_EQF(o.control_delta_c, 26.5f - 25.0f); CHECK_EQI(o.fan_idx, 3);
     CHECK_EQI(st.sa_mode, -1); // explicit modes never touch sa_mode
   }
   // Explicit HEAT.
@@ -227,7 +239,7 @@ static void group_b_edge_cases() {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(true, 1, 27, 30, false, 26.5f, 1000), st);
     CHECK(o.power); CHECK_EQI(o.mode, 0); CHECK_EQF(o.temp, 27.0f);
-    CHECK_EQF(o.control_delta_c, 27.0f - 26.5f); CHECK_EQI(o.fan_idx, 3);
+    CHECK_EQF(o.control_delta_c, 27.0f - 26.5f); CHECK_EQI(o.fan_idx, 2);
   }
   // Negative delta preserved raw (explicit COOL with room below threshold).
   {
@@ -299,9 +311,9 @@ static void group_d_ramp_timing() {
   {
     DecisionState st;
     // t0: high demand -> instant max.
-    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 26.5f, 1000), st);
+    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 28.0f, 1000), st);
     CHECK_EQI(o.fan_idx, 5);
-    // demand drops (desired 3): step-down arms, fan holds.
+    // demand drops (desired 2): step-down arms, fan holds.
     o = ac_decide(mkin(true, 2, H, 25, false, 25.5f, 10000), st);
     CHECK_EQI(o.fan_idx, 5); CHECK_EQI(st.lower_since, 10000);
     // 59,999 ms elapsed: still holding.
@@ -309,18 +321,18 @@ static void group_d_ramp_timing() {
     CHECK_EQI(o.fan_idx, 5);
     // 60,000 ms elapsed: drops to the CURRENT desired.
     o = ac_decide(mkin(true, 2, H, 25, false, 25.5f, 70000), st);
-    CHECK_EQI(o.fan_idx, 3); CHECK_EQI(st.lower_since, 0);
+    CHECK_EQI(o.fan_idx, 2); CHECK_EQI(st.lower_since, 0);
     // any demand increase is instant.
-    o = ac_decide(mkin(true, 2, H, 25, false, 26.5f, 71000), st);
+    o = ac_decide(mkin(true, 2, H, 25, false, 28.0f, 71000), st);
     CHECK_EQI(o.fan_idx, 5);
   }
   // Step-down lands on the desired value AT EXPIRY, not the one that armed it.
   {
     DecisionState st;
-    (void)ac_decide(mkin(true, 2, H, 25, false, 26.5f, 1000), st);   // fan 5
-    (void)ac_decide(mkin(true, 2, H, 25, false, 25.5f, 2000), st);   // arm @2000 (desired 3)
-    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 26.0f, 62000), st); // desired 4 now
-    CHECK_EQI(o.fan_idx, 4);
+    (void)ac_decide(mkin(true, 2, H, 25, false, 28.0f, 1000), st);   // fan 5
+    (void)ac_decide(mkin(true, 2, H, 25, false, 25.5f, 2000), st);   // arm @2000 (desired 2)
+    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 26.0f, 62000), st); // desired 3 now
+    CHECK_EQI(o.fan_idx, 3);
   }
   // Deadband snaps to the floor and clears ramp memory.
   {
@@ -332,31 +344,31 @@ static void group_d_ramp_timing() {
   // millis() wrap across zero: armed near UINT32_MAX, expires after wrap.
   {
     DecisionState st;
-    (void)ac_decide(mkin(true, 2, H, 25, false, 26.5f, 0xFFFFFE00u), st); // fan 5
+    (void)ac_decide(mkin(true, 2, H, 25, false, 28.0f, 0xFFFFFE00u), st); // fan 5
     (void)ac_decide(mkin(true, 2, H, 25, false, 25.5f, 0xFFFFFF00u), st); // arm
     CHECK_EQI(st.lower_since, 0xFFFFFF00u);
     DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 25.5f, 59744), st);
     // 59744 - 0xFFFFFF00 (mod 2^32) == 60000 -> steps down.
-    CHECK_EQI(o.fan_idx, 3);
+    CHECK_EQI(o.fan_idx, 2);
   }
   // Preserved quirk: arming exactly at now_ms==0 leaves the sentinel unset,
   // so the countdown silently restarts on the next tick. Same as a805f40.
   {
     DecisionState st;
-    (void)ac_decide(mkin(true, 2, H, 25, false, 26.5f, 0xFFFF0000u), st); // fan 5
+    (void)ac_decide(mkin(true, 2, H, 25, false, 28.0f, 0xFFFF0000u), st); // fan 5
     (void)ac_decide(mkin(true, 2, H, 25, false, 25.5f, 0), st); // arm at 0 -> no-op
     CHECK_EQI(st.lower_since, 0);
     (void)ac_decide(mkin(true, 2, H, 25, false, 25.5f, 59999), st); // re-arms here
     CHECK_EQI(st.lower_since, 59999);
     DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 25.5f, 119999), st);
-    CHECK_EQI(o.fan_idx, 3); // drops only 60s after the RE-arm
+    CHECK_EQI(o.fan_idx, 2); // drops only 60s after the RE-arm
   }
   // Easing all the way down to the QUIET floor: high demand, then hold the room
   // at/below setpoint (delta <= 0 -> desired QUIET(1)) past the step-down window.
   // Exercises the new floor through the real ramp path, not just the bare curve.
   {
     DecisionState st;
-    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 26.5f, 1000), st); // fan 5
+    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 28.0f, 1000), st); // fan 5
     CHECK_EQI(o.fan_idx, 5);
     o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 2000), st);   // delta -0.5, arm @2000
     CHECK_EQI(o.fan_idx, 5); CHECK_EQI(st.lower_since, 2000);
@@ -708,9 +720,11 @@ static void group_k_normalize() {
 static void group_i_auto_fan_ramp() {
   // heat 18 / cool 24 -> cool target 22.5. Fresh state each tick so the 60s
   // step-down dwell does not mask which index the curve actually asks for.
+  // Descending, cool target 22.5. Every rung appears, which is what the 3.0
+  // span buys: delta 3.0/2.5/1.5/0.5 -> 100/75/50/25%, then the floor.
   struct { float room; uint8_t mode, fan; } expect[] = {
-    {26.0f, 2, 5}, {25.0f, 2, 5}, {24.5f, 2, 5}, {24.0f, 2, 5},
-    {23.5f, 2, 4}, {23.0f, 2, 3},
+    {25.5f, 2, 5}, {25.0f, 2, 4}, {24.5f, 2, 4}, {24.0f, 2, 3},
+    {23.5f, 2, 3}, {23.0f, 2, 2},
     {22.5f, 3, FAN_IDX_MIN},   // reached the target: released, fan to the floor
   };
   for (auto &e : expect) {
@@ -722,7 +736,8 @@ static void group_i_auto_fan_ramp() {
 
   // Same on the heating side: heat 18 / cool 24 -> heat target 19.5.
   struct { float room; uint8_t mode, fan; } heat_expect[] = {
-    {16.0f, 0, 5}, {18.0f, 0, 5}, {18.5f, 0, 4}, {19.0f, 0, 3},
+    {16.5f, 0, 5}, {17.0f, 0, 4}, {17.5f, 0, 4}, {18.0f, 0, 3},
+    {18.5f, 0, 3}, {19.0f, 0, 2},
     {19.5f, 3, FAN_IDX_MIN},
   };
   for (auto &e : heat_expect) {
@@ -731,6 +746,12 @@ static void group_i_auto_fan_ramp() {
     CHECK_EQI(o.mode, e.mode);
     CHECK_EQI(o.fan_idx, e.fan);
   }
+
+  // Both legs together must cover all five rungs, not just three of them.
+  bool seen[6] = {false, false, false, false, false, false};
+  for (auto &e : expect)      seen[e.fan] = true;
+  for (auto &e : heat_expect) seen[e.fan] = true;
+  for (int i = 1; i <= 5; i++) CHECK(seen[i]);
 }
 
 // Group J - a call must always end in the idle band, never in the opposite

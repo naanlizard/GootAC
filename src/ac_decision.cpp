@@ -53,11 +53,9 @@ float auto_heat_target(float heat_threshold, float cool_threshold) {
 }
 
 // Exponential airflow ramp: QUIET at or below setpoint, then 25% just past it up
-// to 100% at FAN_RAMP_SPAN_C. Index 2 (25%) spans delta 0 exclusive to ~0.44, so
-// it is unreachable in practice: the room sensor and every commanded setpoint sit
-// on the same 0.5C grid, and delta 0 short-circuits to QUIET. Reachable set is
-// {1, 3, 4, 5}. Widening FAN_RAMP_SPAN_C past ~1.71 would put 0.5 in index 2's
-// band, at the cost of softening the whole ramp.
+// to 100% at FAN_RAMP_SPAN_C. On the 0.5C grid the room and the setpoint share,
+// the span of 3.0 puts every index in reach: delta 0 -> QUIET, 0.5 -> 25%,
+// 1.0/1.5 -> 50%, 2.0/2.5 -> 75%, 3.0 and beyond -> 100%.
 uint8_t fan_index_for_delta(float delta) {
   if (delta <= 0.0f) return FAN_IDX_MIN;   // at/below setpoint -> QUIET
   float x = delta / FAN_RAMP_SPAN_C;
