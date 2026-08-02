@@ -24,12 +24,18 @@ public:
             while (src.available()) {
                 size_t n = src.read(buf, sizeof(buf));
                 dest.write(buf, n);
+                // 16KB in 256-byte chunks onto a log that may already be 256KB
+                // outruns the software watchdog on a fragmented filesystem.
+                ESP.wdtFeed();
+                yield();
             }
         }
         if (dest) dest.close();
         if (src) src.close();
 
+        ESP.wdtFeed();
         LittleFS.remove("/system.log");
+        ESP.wdtFeed();
     }
 
     void flushToFile() {
@@ -75,7 +81,10 @@ public:
         }
 
         if (wipe) {
+            // Unlinking a 256KB file walks every block it owns.
+            ESP.wdtFeed();
             LittleFS.remove("/system.log.old");
+            ESP.wdtFeed();
         }
     }
     size_t write(uint8_t c) override {

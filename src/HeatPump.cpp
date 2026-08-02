@@ -796,6 +796,12 @@ int HeatPump::readPacket() {
               // quirk -- aren't misread as an external (IR/timer) change.
               heatpumpSettings wantedCmp = wantedSettings;
               wantedCmp.fan = receivedSettings.fan;
+              // FAN and DRY are commanded without a setpoint, so wantedSettings
+              // keeps a stale one and the unit's own value is not an external
+              // change. Compare only the fields we actually send.
+              if (wantedCmp.mode &&
+                  (strcmp(wantedCmp.mode, "FAN") == 0 || strcmp(wantedCmp.mode, "DRY") == 0))
+                wantedCmp.temperature = receivedSettings.temperature;
               _externalUpdateOccurred = (receivedSettings != wantedCmp);
               if (settingsChangedCallback) {
                 GLOG_INFO("MITSUBISHI", "RECV: Settings Changed (%s)",
