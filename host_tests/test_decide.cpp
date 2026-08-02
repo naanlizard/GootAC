@@ -779,9 +779,10 @@ static void group_l_rung_hysteresis() {
     }
     return changes;
   };
-  // Every adjacent pair of grid points, across the whole ramp. One transition
-  // to settle is allowed; a boundary straddle would give one per tick.
-  for (float a = C; a <= C + 4.0f; a += 0.5f)
+  // Every adjacent pair of grid points, from below the setpoint out past the
+  // top rung, so all three boundaries (~0.88, ~1.98, ~2.71) are straddled. One
+  // transition to settle is allowed; a straddle would give one per tick.
+  for (float a = C - 1.0f; a <= C + 8.0f; a += 0.5f)
     CHECK(run(a, a + 0.5f, 40) <= 1);
 
   // Rising demand still ramps, and a two-rung jump is not held back.

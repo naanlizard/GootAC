@@ -49,8 +49,8 @@ float auto_heat_target(float heat_threshold, float cool_threshold) {
   return heat_threshold + auto_pull_c(heat_threshold, cool_threshold);
 }
 
-// Exponential ramp, QUIET at or below setpoint to 100% at FAN_RAMP_SPAN_C.
-// On the 0.5C grid: 0.5 -> 25%, 1.0/1.5 -> 50%, 2.0/2.5 -> 75%, 3.0 -> 100%.
+// Exponential ramp, QUIET at or below setpoint to 100% at FAN_RAMP_SPAN_C. This
+// is the raw curve; the rung hysteresis in ac_decide gates which steps are taken.
 uint8_t fan_index_for_delta(float delta) {
   if (delta <= 0.0f) return FAN_IDX_MIN;   // at/below setpoint -> QUIET
   float x = delta / FAN_RAMP_SPAN_C;

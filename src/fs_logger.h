@@ -10,22 +10,26 @@ private:
 
 public:
     void rotate() {
+        ESP.wdtFeed();
         if (!LittleFS.exists("/system.log")) return;
 
         // Perform cleanup BEFORE appending to avoid exceeding limits
         checkRetention();
 
         // Append system.log to system.log.old
+        ESP.wdtFeed();
         File dest = LittleFS.open("/system.log.old", "a");
+        ESP.wdtFeed();
         File src = LittleFS.open("/system.log", "r");
         if (dest && src) {
             dest.println("\n--- [Rotation/Reboot] ---");
             uint8_t buf[256];
             while (src.available()) {
                 size_t n = src.read(buf, sizeof(buf));
+                // read() returns 0 on error WITHOUT advancing, and available()
+                // is size-position, so without this the loop never ends.
+                if (n == 0) break;
                 dest.write(buf, n);
-                // 16KB in 256-byte chunks onto a log that may already be 256KB
-                // outruns the software watchdog on a fragmented filesystem.
                 ESP.wdtFeed();
                 yield();
             }
@@ -40,25 +44,34 @@ public:
 
     void flushToFile() {
         if (buffer.length() == 0) return;
-        
+        // yield() during rotation can re-enter this. Take the buffer first so a
+        // line logged from inside survives, and refuse the nested rotate.
+        static bool in_flush = false;
+        if (in_flush) return;
+        in_flush = true;
+        String pending = buffer;
+        buffer = "";
+
+        ESP.wdtFeed();
         File f = LittleFS.open("/system.log", "a");
         if (f) {
             // If the current log file hits 16KB, merge it into the archive (.old)
-            if (f.size() > 16384) { 
+            if (f.size() > 16384) {
                 f.close();
                 rotate();
                 f = LittleFS.open("/system.log", "a");
             }
             if (f) {
-                f.print(buffer);
+                f.print(pending);
                 f.close();
             }
         }
-        buffer = "";
+        in_flush = false;
     }
 
 public:
     void checkRetention() {
+        ESP.wdtFeed();
         if (!LittleFS.exists("/system.log.old")) return;
 
         bool wipe = false;
