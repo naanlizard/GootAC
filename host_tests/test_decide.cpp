@@ -11,6 +11,7 @@
 //   I - fan ramp stays multi-level inside Smart Auto
 //   J - a call always releases into the idle band, never into the opposite call
 //   K - normalize_thresholds: the only guard on restored/migrated flash state
+//   L - fan rung hysteresis: a room on a boundary must not move the fan
 #include "ac_decision.h"
 #include <math.h>
 #include <stdint.h>
@@ -64,12 +65,16 @@ static DecisionInput mkin(bool active, uint8_t mode, float heat, float cool,
 }
 
 // ---------------------------------------------------------------------------
-// Frozen reference for the oracle sweep, extracted from a805f40 into
-// ref_extract_a805f40.txt and re-checked by the Makefile's check-ref target.
+// Reference for the oracle sweep. The thermal decision for explicit HEAT/COOL
+// is a805f40's, extracted into ref_extract_a805f40.txt; check-ref only proves
+// that extract still matches git, never that this function does.
 //
-// Smart Auto's decision is absent; `live` supplies it. Recomputing it would
-// check auto_*_target() against itself, so only the ramp outputs mean anything
-// for tm 0. The delta expression takes hpTemp, so it differs from the extract.
+// The fan block has diverged from a805f40 twice, in the delta expression and
+// the rung hysteresis, so for the ramp this is a parallel implementation rather
+// than a frozen one. It still catches damage to the step-down state machine
+// (dwell, millis wrap, sentinel); the curve and the hysteresis policy are pinned
+// by group_a and group_l, not here. Smart Auto's decision is absent entirely;
+// `live` supplies it, so only the ramp outputs mean anything for tm 0.
 // ---------------------------------------------------------------------------
 static void decide_reference(bool target_active, uint8_t hk_target_mode,
                              float heatThr, float coolThr, bool dehumidify,
@@ -107,6 +112,9 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
     if (hpPower && room_known && (hpMode == 2 || hpMode == 0)) {
       float delta = (hpMode == 2) ? (roomTemp - hpTemp) : (hpTemp - roomTemp);
       uint8_t desired = fan_index_for_delta(delta);
+      if (desired > last_fan_idx &&
+          fan_index_for_delta(delta - SENSOR_STEP_C) <= last_fan_idx)
+        desired = last_fan_idx;
       if (last_fan_idx < FAN_IDX_MIN || desired > last_fan_idx) {
         last_fan_idx = desired; lower_since = 0;
       } else if (desired < last_fan_idx) {
@@ -548,8 +556,8 @@ static void group_h_pull_table() {
 
   // No permitted range parks on its own midpoint: that needs pull == range/2,
   // impossible at or above the gap, where pull floors at 1.0 and half is 1.5.
-  for (float heat = 5.0f; heat <= 40.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
-    for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 40.0f; cool += 0.5f) {
+  for (float heat = 16.0f; heat <= 31.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
+    for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 31.0f; cool += 0.5f) {
       const float mid = 0.5f * (heat + cool);
       CHECK(auto_cool_target(heat, cool) > mid);
       CHECK(auto_heat_target(heat, cool) < mid);
@@ -557,7 +565,7 @@ static void group_h_pull_table() {
 
   // Targets are commandable only because they stay between the thresholds; the
   // band itself is normalize_thresholds()'s job, not this function's.
-  const float grid_lo = 5.0f, grid_hi = 40.0f;   // characteristic min/max
+  const float grid_lo = 16.0f, grid_hi = 31.0f;   // characteristic min/max
   CHECK_EQF(auto_cool_target(2.0f, 50.0f), 48.0f);
   CHECK_EQF(auto_heat_target(0.0f, 2.0f), 1.0f);
   for (float heat = grid_lo; heat <= grid_hi; heat += 0.5f)
@@ -573,7 +581,7 @@ static void group_h_pull_table() {
 // Group K - normalize_thresholds() is all that stands between a restored flash
 // pair and a core with no defences. Checked as a live failure, then as a repair.
 static void group_k_normalize() {
-  const float LO = 5.0f, HI = 40.0f;   // characteristic min/max
+  const float LO = 16.0f, HI = 31.0f;   // characteristic min/max
   CHECK(HI - LO >= THRESHOLD_MIN_GAP_C);   // precondition the function assumes
 
   // The failure being defended against: inverted thresholds, room held still.
@@ -594,19 +602,18 @@ static void group_k_normalize() {
     {18.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 18.0f, 24.0f, false},
     {18.0f, 24.0f, THRESHOLD_FROM_COOL_WRITE, 18.0f, 24.0f, false},
     {18.0f, 24.0f, THRESHOLD_UNTRUSTED,       18.0f, 24.0f, false},
-    {5.0f,  8.0f,  THRESHOLD_FROM_HEAT_WRITE, 5.0f,  8.0f,  false},  // exactly the gap
+    {16.0f, 19.0f, THRESHOLD_FROM_HEAT_WRITE, 16.0f, 19.0f, false},  // exactly the gap
     // Too narrow: the value the caller did NOT write is the one that moves.
     {20.0f, 21.0f, THRESHOLD_FROM_HEAT_WRITE, 20.0f, 23.0f, true},
     {20.0f, 21.0f, THRESHOLD_FROM_COOL_WRITE, 18.0f, 21.0f, true},
     {22.0f, 22.0f, THRESHOLD_FROM_HEAT_WRITE, 22.0f, 25.0f, true},
     // Too narrow AND against a bound: only then does the written value give way.
-    {5.0f,  6.0f,  THRESHOLD_FROM_COOL_WRITE, 5.0f,  8.0f,  true},
-    {39.0f, 40.0f, THRESHOLD_FROM_HEAT_WRITE, 37.0f, 40.0f, true},
+    {16.0f, 17.0f, THRESHOLD_FROM_COOL_WRITE, 16.0f, 19.0f, true},
+    {29.0f, 31.0f, THRESHOLD_FROM_HEAT_WRITE, 28.0f, 31.0f, true},
     // The written value must survive: a swap would land it on the other
     // characteristic, turning cool=17 over 25/27 into heat=17.
-    {25.0f, 17.0f, THRESHOLD_FROM_COOL_WRITE, 14.0f, 17.0f, true},
     {25.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 25.0f, 28.0f, true},
-    {39.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 37.0f, 40.0f, true},
+    {30.0f, 24.0f, THRESHOLD_FROM_HEAT_WRITE, 28.0f, 31.0f, true},
     {22.0f, 19.0f, THRESHOLD_FROM_COOL_WRITE, 16.0f, 19.0f, true},
     // Inverted in restored state: neither value is trusted, so reorder.
     {25.0f, 20.0f, THRESHOLD_UNTRUSTED, 20.0f, 25.0f, true},
@@ -615,10 +622,9 @@ static void group_k_normalize() {
     // Reorder even a one-step inversion, so the range stays where it was.
     {24.0f, 23.5f, THRESHOLD_UNTRUSTED, 23.5f, 26.5f, true},
     // Outside the band; the legacy v1.12 migration admits 10-40C.
-    {0.0f,  50.0f, THRESHOLD_UNTRUSTED, 5.0f,  40.0f, true},
-    {12.0f, 12.5f, THRESHOLD_UNTRUSTED, 12.0f, 15.0f, true},
-    {2.0f,  3.0f,  THRESHOLD_UNTRUSTED, 5.0f,  8.0f,  true},
-    {45.0f, 48.0f, THRESHOLD_UNTRUSTED, 37.0f, 40.0f, true},
+    {0.0f,  50.0f, THRESHOLD_UNTRUSTED, 16.0f, 31.0f, true},
+    {12.0f, 12.5f, THRESHOLD_UNTRUSTED, 16.0f, 19.0f, true},
+    {45.0f, 48.0f, THRESHOLD_UNTRUSTED, 28.0f, 31.0f, true},
   };
   for (const Row &r : rows) {
     float h = r.in_h, c = r.in_c;
@@ -711,8 +717,8 @@ static void group_i_auto_fan_ramp() {
 // Group J - a call must end in the idle band, never in the opposite call, or
 // the unit reverses forever. Walks a room across every range the core can see.
 static void group_j_no_reversal() {
-  for (float heat = 5.0f; heat <= 39.0f; heat += 0.5f)
-    for (float cool = heat; cool <= 40.0f; cool += 0.5f) {
+  for (float heat = 16.0f; heat <= 30.0f; heat += 0.5f)
+    for (float cool = heat; cool <= 31.0f; cool += 0.5f) {
       // Enter COOL from above, then run until the mode changes.
       DecisionState st; st.sa_mode = 2;
       float room = cool + 2.0f;
@@ -741,8 +747,8 @@ static void group_j_no_reversal() {
 
   // A running call must yield DIRECTLY to the opposite one when a threshold is
   // dragged past the room. The walk above always meets its target first.
-  for (float heat = 5.0f; heat <= 40.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
-    for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 40.0f; cool += 0.5f) {
+  for (float heat = 16.0f; heat <= 31.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
+    for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 31.0f; cool += 0.5f) {
       // Cooling, then the heating threshold is raised above the room.
       DecisionState st; st.sa_mode = 2;
       DecisionOutput o = ac_decide(mkin(true, 0, heat, cool, false, heat - 0.5f, 10000), st);
@@ -758,6 +764,57 @@ static void group_j_no_reversal() {
     }
 }
 
+// Group L - a room parked on a rung boundary must not move the fan. Up is
+// immediate and down is damped, so without hysteresis each up-tick cancels the
+// pending step-down and every tick emits a CN105 packet. Observed on Sala at
+// 1.26: 84 identical settings packets in 8.4 h with no decision change.
+static void group_l_rung_hysteresis() {
+  const float H = 16.0f, C = 23.5f;
+  auto run = [&](float a, float b, int ticks) {
+    DecisionState st; uint32_t t = 10000; int changes = 0; uint8_t prev = 255;
+    for (int i = 0; i < ticks; i++) {
+      DecisionOutput o = ac_decide(mkin(true, 2, H, C, false, (i % 2) ? b : a, t), st);
+      if (prev != 255 && o.fan_idx != prev) changes++;
+      prev = o.fan_idx; t += 10000;
+    }
+    return changes;
+  };
+  // Every adjacent pair of grid points, across the whole ramp. One transition
+  // to settle is allowed; a boundary straddle would give one per tick.
+  for (float a = C; a <= C + 4.0f; a += 0.5f)
+    CHECK(run(a, a + 0.5f, 40) <= 1);
+
+  // Rising demand still ramps, and a two-rung jump is not held back.
+  {
+    DecisionState st; uint32_t t = 10000;
+    uint8_t seq[8]; int n = 0;
+    for (float r = C; r <= C + 3.5f && n < 8; r += 0.5f)
+      seq[n++] = ac_decide(mkin(true, 2, H, C, false, r, t += 10000), st).fan_idx;
+    CHECK_EQI(seq[0], 1);     // at setpoint
+    CHECK_EQI(seq[1], 1);     // one step past: held, this is the chatter case
+    CHECK_EQI(seq[2], 3);     // a full step clear of the rung: allowed up
+    CHECK(seq[7] >= 4);       // and it keeps climbing
+  }
+
+  // A fresh state has no rung to hold, so a large excursion is still instant.
+  {
+    DecisionState st;
+    CHECK_EQI(ac_decide(mkin(true, 2, H, C, false, C + 6.5f, 10000), st).fan_idx, 5);
+  }
+
+  // The step-down dwell is unaffected: hysteresis gates increases only.
+  {
+    DecisionState st;
+    (void)ac_decide(mkin(true, 2, H, C, false, C + 3.0f, 1000), st);
+    uint8_t hi = st.last_fan_idx;
+    CHECK(hi >= 4);
+    DecisionOutput o = ac_decide(mkin(true, 2, H, C, false, C, 2000), st);
+    CHECK_EQI(o.fan_idx, hi);                  // holds during the dwell
+    o = ac_decide(mkin(true, 2, H, C, false, C, 62000), st);
+    CHECK_EQI(o.fan_idx, FAN_IDX_MIN);         // and eases down on expiry
+  }
+}
+
 int main() {
   group_a_fan_curve();
   group_b_edge_cases();
@@ -770,6 +827,7 @@ int main() {
   group_i_auto_fan_ramp();
   group_j_no_reversal();
   group_k_normalize();
+  group_l_rung_hysteresis();
   printf("%d checks, %d failures\n", g_checks, g_fails);
   return g_fails ? 1 : 0;
 }

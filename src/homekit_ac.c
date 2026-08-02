@@ -27,10 +27,11 @@ homekit_characteristic_t cha_ac_active = HOMEKIT_CHARACTERISTIC_(ACTIVE, 0);
 homekit_characteristic_t cha_ac_current_state = HOMEKIT_CHARACTERISTIC_(CURRENT_HEATER_COOLER_STATE, 0);
 homekit_characteristic_t cha_ac_target_state = HOMEKIT_CHARACTERISTIC_(TARGET_HEATER_COOLER_STATE, 0);
 homekit_characteristic_t cha_ac_current_temp = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 22.0, .min_value = (float[]) {MIN_VALID_ROOM_TEMP_C}, .max_value = (float[]) {MAX_VALID_ROOM_TEMP_C});
-// Wider than both the HAP defaults (cooling 10-35, heating 0-25) and the 16-31C
-// the CN105 carries; the ends set an idle band, they are not commandable.
-homekit_characteristic_t cha_ac_cooling_threshold = HOMEKIT_CHARACTERISTIC_(COOLING_THRESHOLD_TEMPERATURE, 24.0, .min_value = (float[]) {5}, .max_value = (float[]) {40});
-homekit_characteristic_t cha_ac_heating_threshold = HOMEKIT_CHARACTERISTIC_(HEATING_THRESHOLD_TEMPERATURE, 18.0, .min_value = (float[]) {5}, .max_value = (float[]) {40});
+// Matches TEMP_MAP, the CN105 setpoint vocabulary. Smart Auto aims auto_pull_c()
+// inside the range, so a wider slider would target temperatures the unit cannot
+// be told, and the call would never reach its release point.
+homekit_characteristic_t cha_ac_cooling_threshold = HOMEKIT_CHARACTERISTIC_(COOLING_THRESHOLD_TEMPERATURE, 24.0, .min_value = (float[]) {16}, .max_value = (float[]) {31});
+homekit_characteristic_t cha_ac_heating_threshold = HOMEKIT_CHARACTERISTIC_(HEATING_THRESHOLD_TEMPERATURE, 18.0, .min_value = (float[]) {16}, .max_value = (float[]) {31});
 homekit_characteristic_t cha_ac_swing_mode = HOMEKIT_CHARACTERISTIC_(SWING_MODE, 0);
 homekit_characteristic_t cha_ac_temp_display_units = HOMEKIT_CHARACTERISTIC_(TEMPERATURE_DISPLAY_UNITS, 0);
 // 0 = no fault, 1 = general fault. We set 1 when the AC reports it
@@ -110,5 +111,6 @@ homekit_server_config_t config = {
     //       schemas cached by the canary's paired controller
     //   7 = v1.33: threshold min/max widened from 16-31 to 5-40. Nothing added
     //       or removed, but iOS caches the declared range as part of the schema
-    .config_number = 7
+    //   8 = v1.36: reverted to 16-31, which is what TEMP_MAP can express
+    .config_number = 8
 };

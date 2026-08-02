@@ -117,6 +117,12 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
       float delta = (out.mode == 2) ? (in.room_temp - out.temp)
                                     : (out.temp - in.room_temp);
       uint8_t desired = fan_index_for_delta(delta);
+      // A step up must clear the rung by a whole sensor step. The room moves in
+      // 0.5C jumps, so one parked on a boundary would raise the fan every tick
+      // and cancel the pending step-down on the next, forever.
+      if (desired > state.last_fan_idx &&
+          fan_index_for_delta(delta - SENSOR_STEP_C) <= state.last_fan_idx)
+        desired = state.last_fan_idx;
       // Ramp up at once; ease down only after sustained lower demand.
       if (state.last_fan_idx < FAN_IDX_MIN || desired > state.last_fan_idx) {
         state.last_fan_idx = desired; state.lower_since = 0;
