@@ -922,18 +922,9 @@ int HeatPump::readPacket() {
                  currentStatus.statusByte3 !=
                      receivedStatus.statusByte3)) {
 
-              // Log the raw byte without interpretation. SwiCago labels
-              // this field "compressorFrequency"; we renamed it to
-              // statusByte3 because the actual semantic is unverified.
-              // Observed: moves in lockstep across all 4 indoor units
-              // (system-wide outdoor signal), but the units (Hz / °C /
-              // other) are unverified. Don't claim it's a temperature.
-              GLOG_INFO(
-                  "MITSUBISHI",
-                  "RECV: Status Change (Op=%d, byte3=%d)",
-                  receivedStatus.operating,
-                  receivedStatus.statusByte3);
-
+              // Not logged: statusByte3 changes every few seconds, which
+              // rotated the whole 16KB log every ~3h. Exported as
+              // gootac_ac_status_byte3 instead.
               currentStatus.operating = receivedStatus.operating;
               currentStatus.statusByte3 =
                   receivedStatus.statusByte3;
