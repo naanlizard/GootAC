@@ -48,6 +48,9 @@ homekit_characteristic_t cha_dehumidifier_target_state = HOMEKIT_CHARACTERISTIC_
 // (confirmed by exhaustive sweep + Mitsubishi's licensed Modbus
 // gateway publishing no humidity register). Fixed 50% stub satisfies
 // the spec so iOS Home stops reporting "No Response" for the tile.
+// Seeded at 50 and overwritten by ac_controller_report_humidity() once anything
+// pushes a reading to /control. With no feed it stays at the seed, so treat a
+// flat 50 as "never reported" rather than as a measurement.
 homekit_characteristic_t cha_dehumidifier_current_humidity = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 50.0);
 
 // Build the Accessory Database

@@ -208,6 +208,40 @@ void load_target_state() {
 // client's own value is already queued here, so a correction must go out later.
 static bool pending_threshold_renotify = false;
 
+// Externally supplied indoor humidity. 0 = nothing has ever been reported;
+// millis() 0 is otherwise indistinguishable from a stale entry, so the sentinel
+// lives in the timestamp being zero AND g_humidity_seen being false.
+static float         g_humidity_pct = 0.0f;
+static unsigned long g_humidity_at = 0;
+static bool          g_humidity_seen = false;
+static constexpr unsigned long HUMIDITY_STALE_MS = 15UL * 60UL * 1000UL;
+
+void ac_controller_report_humidity(float percent) {
+  if (percent < 0.0f || percent > 100.0f) return;
+  g_humidity_pct = percent;
+  g_humidity_at = millis();
+  g_humidity_seen = true;
+  // TRACE, not INFO: a push every few minutes at INFO would rotate the log as
+  // fast as the statusByte3 line it would sit next to. /metrics carries it.
+  char buf[10];
+  dtostrf(percent, 1, 1, buf);
+  GLOG_TRACE("SYS", "Humidity reported: %s%%", buf);
+  if (cha_dehumidifier_current_humidity.value.float_value != percent) {
+    cha_dehumidifier_current_humidity.value.float_value = percent;
+    homekit_characteristic_notify(&cha_dehumidifier_current_humidity,
+                                  cha_dehumidifier_current_humidity.value);
+  }
+}
+
+// False once the feed goes quiet, so a HomePod automation that breaks silently
+// cannot pin a control decision to a reading from hours ago.
+bool ac_controller_humidity_fresh(float& percent_out) {
+  if (!g_humidity_seen) return false;
+  if (millis() - g_humidity_at > HUMIDITY_STALE_MS) return false;
+  percent_out = g_humidity_pct;
+  return true;
+}
+
 static void enforce_threshold_gap(ThresholdAuthority who) {
   float heat = cha_ac_heating_threshold.value.float_value;
   float cool = cha_ac_cooling_threshold.value.float_value;
@@ -741,6 +775,13 @@ void ac_controller_write_metrics(Print& out) {
     m_b(out, F("gootac_ac_preheat_active"),   F("1 if the AC is preheating, else 0."),                              (st.statusFlags & HP_STATUS_PREHEAT) != 0);
     m_b(out, F("gootac_ac_blocked_by_other"), F("1 if blocked by another unit on the shared outdoor unit, else 0."), (st.statusFlags & HP_STATUS_BLOCKED_BY_OTHER) != 0);
     m_i(out, F("gootac_ac_status_byte3"), F("Raw byte 3 of the 0x06 status packet; unverified outdoor telemetry, NOT degrees C."), st.statusByte3);
+    {
+      float h;
+      bool fresh = ac_controller_humidity_fresh(h);
+      m_b(out, F("gootac_humidity_fresh"), F("1 if an external humidity reading arrived within the staleness window."), fresh);
+      m_f(out, F("gootac_humidity_percent"), F("Externally reported indoor relative humidity; meaningless unless gootac_humidity_fresh is 1."), g_humidity_seen ? g_humidity_pct : 0.0f);
+      m_u(out, F("gootac_humidity_age_seconds"), F("Seconds since the last external humidity report; 0 if none has ever arrived."), g_humidity_seen ? (uint32_t)((millis() - g_humidity_at) / 1000UL) : 0UL);
+    }
 
     m_doc(out, F("gootac_ac_mode_info"), F("Hardware mode, fan, wanted fan, and HomeKit target mode as labels; value always 1."));
     out.print(F("gootac_ac_mode_info{hw_mode=\"")); out.print(s.mode);

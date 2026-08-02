@@ -49,6 +49,12 @@ void set_ac_cooling_threshold(homekit_value_t value);
 void set_ac_heating_threshold(homekit_value_t value);
 void set_ac_swing_mode(homekit_value_t value);
 void set_dehumidifier_active(homekit_value_t value);
+
+// Indoor humidity pushed in from outside, since the CN105 does not report it.
+// The reading is timestamped: a HomePod automation feeding this can fail
+// silently for weeks, so anything consuming it must check the age first.
+void ac_controller_report_humidity(float percent);
+bool ac_controller_humidity_fresh(float& percent_out);
 #endif
 
 #ifdef __cplusplus

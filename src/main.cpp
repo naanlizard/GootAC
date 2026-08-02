@@ -273,11 +273,13 @@ void setup_webserver() {
         {"dehumidifier", 0, 1, true}, {"active", 0, 1, true},
         {"mode", 0, 2, true},         {"heat", 16, 31, false},
         {"cool", 16, 31, false},      {"swing", 0, 1, true},
+        {"humidity", 0, 100, false},
     };
-    float vals[6];
-    bool has[6] = {false, false, false, false, false, false};
+    constexpr int NFIELD = sizeof(FIELDS) / sizeof(FIELDS[0]);
+    float vals[NFIELD];
+    bool has[NFIELD] = {false};
     int nset = 0;
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < NFIELD; i++) {
       if (!server.hasArg(FIELDS[i].name)) continue;
       float v;
       if (!parseNum(server.arg(FIELDS[i].name), v) || v < FIELDS[i].lo ||
@@ -295,8 +297,15 @@ void setup_webserver() {
       return;
     }
     GLOG_INFO("SYS", "/control applying %d field(s)", nset);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < NFIELD; i++) {
       if (!has[i]) continue;
+      // Not a HomeKit characteristic write: it has no setter and must not go
+      // through update_state()'s debounce, or a humidity push would re-command
+      // the AC every two minutes.
+      if (strcmp(FIELDS[i].name, "humidity") == 0) {
+        ac_controller_report_humidity(vals[i]);
+        continue;
+      }
       homekit_value_t v;
       memset(&v, 0, sizeof(v));
       if (FIELDS[i].integer) {
