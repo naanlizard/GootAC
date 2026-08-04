@@ -8,6 +8,7 @@ struct TargetState {
     float heating_threshold;
     uint8_t swing_mode;          // 0: OFF, 1: SWING
     uint8_t dehumidifier;        // 0: OFF, 1: ON
+    float humidity_threshold;    // Target RH %, HAP dehumidifier threshold
     uint32_t checksum;           // Integrity check
 };
 
@@ -49,6 +50,7 @@ void set_ac_cooling_threshold(homekit_value_t value);
 void set_ac_heating_threshold(homekit_value_t value);
 void set_ac_swing_mode(homekit_value_t value);
 void set_dehumidifier_active(homekit_value_t value);
+void set_dehumidifier_threshold(homekit_value_t value);
 
 // Indoor humidity pushed in from outside, since the CN105 does not report it.
 // The reading is timestamped: a HomePod automation feeding this can fail

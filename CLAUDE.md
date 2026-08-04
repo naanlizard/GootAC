@@ -42,10 +42,11 @@ python3 manage.py monitor       # serial monitor
 
 `src/config.h` is gitignored and must be created from `src/config.h.example`. It defines:
 - `WIFI_SSID` / `WIFI_PASS` - network credentials
-- `HOST_NAME` - mDNS hostname (e.g., `gootac-bedroom`)
-- `ACCESSORY_NAME` - display name in Apple Home app
+- `DEVICE_NAME` - unit name; hostname and accessory name derive from it (`manage.py update` rewrites it per flash)
 - `FW_VERSION` - semver string used for OTA version comparison
 - `FORCE_HK_START` - if true, starts HomeKit server without waiting for AC handshake
+- `HUMIDITY_UNITS` - device names that publish the HomeKit target-humidity slider
+- `MIN/MAX_VALID_ROOM_TEMP_C` (optional) - sensor plausibility bounds
 
 ## Architecture
 

@@ -108,6 +108,7 @@ static void apply_default_target_state() {
   currentState.heating_threshold = 22.0;
   currentState.swing_mode = 0;
   currentState.dehumidifier = 0;
+  currentState.humidity_threshold = 55.0;
 }
 
 // Restored and migrated state reaches ac_decide() without passing through a
@@ -165,6 +166,50 @@ static bool try_migrate_legacy_v12(File &f) {
   return true;
 }
 
+// On-disk layout v1.13-v1.40 (pre-humidity_threshold). Load dispatches on exact
+// file size; without this migration those files fall through to defaults.
+struct LegacyTargetStateV13 {
+  uint8_t active;
+  uint8_t target_mode;
+  float cooling_threshold;
+  float heating_threshold;
+  uint8_t swing_mode;
+  uint8_t dehumidifier;
+  uint32_t checksum;
+};
+
+// Migration dispatch is by file size alone, so a collision would silently load
+// one layout as another.
+static_assert(sizeof(TargetState) != sizeof(LegacyTargetStateV13), "layout collision");
+static_assert(sizeof(TargetState) != sizeof(LegacyTargetStateV12), "layout collision");
+static_assert(sizeof(LegacyTargetStateV13) != sizeof(LegacyTargetStateV12), "layout collision");
+
+static bool try_migrate_legacy_v13(File &f) {
+  if (f.size() != sizeof(LegacyTargetStateV13)) return false;
+  LegacyTargetStateV13 legacy;
+  f.seek(0);
+  if (f.readBytes((char *)&legacy, sizeof(legacy)) != sizeof(legacy)) return false;
+  uint32_t sum = 0;
+  const uint8_t *bytes = (const uint8_t *)&legacy;
+  for (size_t i = 0; i < sizeof(legacy) - 4; i++) sum += bytes[i];
+  if (sum != legacy.checksum) return false;
+  currentState.active = legacy.active;
+  currentState.target_mode = legacy.target_mode;
+  currentState.cooling_threshold = legacy.cooling_threshold;
+  currentState.heating_threshold = legacy.heating_threshold;
+  currentState.swing_mode = legacy.swing_mode;
+  currentState.dehumidifier = legacy.dehumidifier;
+  currentState.humidity_threshold = 55.0;
+  sanitize_loaded_thresholds();
+  char cBuf[10], hBuf[10];
+  dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
+  dtostrf(currentState.heating_threshold, 1, 1, hBuf);
+  GLOG_INFO("SYS", "Migrated legacy target state (Active: %d, Mode: %d, C: %s, H: %s)",
+            currentState.active, currentState.target_mode, cBuf, hBuf);
+  save_target_state();
+  return true;
+}
+
 void load_target_state() {
   if (!LittleFS.exists(STATE_FILE)) {
     GLOG_INFO("SYS", "No state file found. Initializing fresh defaults.");
@@ -191,6 +236,9 @@ void load_target_state() {
       return;
     }
     GLOG_WARN("SYS", "Target State checksum mismatch; applying defaults");
+  } else if (try_migrate_legacy_v13(f)) {
+    f.close();
+    return;
   } else if (try_migrate_legacy_v12(f)) {
     f.close();
     return;
@@ -344,6 +392,22 @@ void set_dehumidifier_active(homekit_value_t value) {
   update_state("HomeKit Dehumidifier Active change");
 }
 
+void set_dehumidifier_threshold(homekit_value_t value) {
+  if (value.format != homekit_format_float) return;
+  float pct = value.float_value;
+  if (isnan(pct) || pct < *cha_dehumidifier_threshold.min_value ||
+      pct > *cha_dehumidifier_threshold.max_value)
+    return;
+  cha_dehumidifier_threshold.value.float_value = pct;
+  currentState.humidity_threshold = pct;
+  char buf[10];
+  dtostrf(pct, 1, 0, buf);
+  HKLOG_INFO("Characteristic Set Dehumidifier Threshold -> %s%%", buf);
+  // Persist directly: no decision input changes, so update_state() would only
+  // re-command the AC for a value nothing reads yet.
+  save_target_state();
+}
+
 // --- Deprecated Fan Mode removed ---
 
 // ----------------------------------------------------
@@ -366,6 +430,7 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
   cha_ac_heating_threshold.value.float_value = currentState.heating_threshold;
   cha_ac_swing_mode.value.uint8_value = currentState.swing_mode;
   cha_dehumidifier_active.value.uint8_value = currentState.dehumidifier;
+  cha_dehumidifier_threshold.value.float_value = currentState.humidity_threshold;
 
   cha_ac_active.setter = set_ac_active;
   cha_ac_target_state.setter = set_ac_target_state;
@@ -373,6 +438,7 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
   cha_ac_heating_threshold.setter = set_ac_heating_threshold;
   cha_ac_swing_mode.setter = set_ac_swing_mode;
   cha_dehumidifier_active.setter = set_dehumidifier_active;
+  cha_dehumidifier_threshold.setter = set_dehumidifier_threshold;
 
   // Enable IR remote change detection in the library
   hp->enableExternalUpdate();
@@ -386,6 +452,9 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
     ac_controller_sync_from_ac();
   });
 
+  homekit_ac_apply_humidity_gate();
+  GLOG_INFO("SYS", "Target-humidity slider: %s",
+            device_has_humidity_feed() ? "published" : "gated off (no HUMIDITY_UNITS match)");
   arduino_homekit_setup(&config);
 }
 
@@ -781,6 +850,8 @@ void ac_controller_write_metrics(Print& out) {
       m_b(out, F("gootac_humidity_fresh"), F("1 if an external humidity reading arrived within the staleness window."), fresh);
       m_f(out, F("gootac_humidity_percent"), F("Externally reported indoor relative humidity; meaningless unless gootac_humidity_fresh is 1."), g_humidity_seen ? g_humidity_pct : 0.0f);
       m_u(out, F("gootac_humidity_age_seconds"), F("Seconds since the last external humidity report; 0 if none has ever arrived."), g_humidity_seen ? (uint32_t)((millis() - g_humidity_at) / 1000UL) : 0UL);
+      m_f(out, F("gootac_humidity_threshold_percent"), F("Target relative humidity set via HomeKit; nothing consumes it yet."), currentState.humidity_threshold);
+      m_b(out, F("gootac_humidity_slider_exposed"), F("1 if this unit publishes the HomeKit target-humidity slider (DEVICE_NAME in HUMIDITY_UNITS)."), device_has_humidity_feed());
     }
 
     m_doc(out, F("gootac_ac_mode_info"), F("Hardware mode, fan, wanted fan, and HomeKit target mode as labels; value always 1."));

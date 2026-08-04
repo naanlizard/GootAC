@@ -1,5 +1,7 @@
 #include <homekit/homekit.h>
 #include <homekit/characteristics.h>
+#include <string.h>
+#include <stdbool.h>
 #include "homekit_ac.h"
 #include "ac_controller.h"
 #include "config.h"
@@ -52,6 +54,42 @@ homekit_characteristic_t cha_dehumidifier_target_state = HOMEKIT_CHARACTERISTIC_
 // pushes a reading to /control. With no feed it stays at the seed, so treat a
 // flat 50 as "never reported" rather than as a measurement.
 homekit_characteristic_t cha_dehumidifier_current_humidity = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 50.0);
+// Target RH. Nothing consumes it yet: DRY still engages on the idle band
+// regardless of this value or of any reported reading.
+homekit_characteristic_t cha_dehumidifier_threshold = HOMEKIT_CHARACTERISTIC_(RELATIVE_HUMIDITY_DEHUMIDIFIER_THRESHOLD, 55.0);
+
+static homekit_characteristic_t cha_dehumidifier_name = HOMEKIT_CHARACTERISTIC_(NAME, "AC Dehumidifier");
+static homekit_characteristic_t cha_dehumidifier_conf_name = HOMEKIT_CHARACTERISTIC_(CONFIGURED_NAME, "Dehumidifier");
+
+// Named rather than an inline literal so homekit_ac_apply_humidity_gate() can
+// shorten it before the server reads the database.
+static homekit_characteristic_t *dehumidifier_chars[] = {
+    &cha_dehumidifier_name,
+    &cha_dehumidifier_conf_name,
+    &cha_dehumidifier_active,
+    &cha_dehumidifier_current_state,
+    &cha_dehumidifier_target_state,
+    &cha_dehumidifier_current_humidity,
+    &cha_dehumidifier_threshold,   // must stay last: the gate drops it by moving NULL up
+    NULL
+};
+
+bool device_has_humidity_feed(void) {
+    static const char *units[] = HUMIDITY_UNITS;
+    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++)
+        if (strcmp(DEVICE_NAME, units[i]) == 0) return true;
+    return false;
+}
+
+void homekit_ac_apply_humidity_gate(void) {
+    if (device_has_humidity_feed()) return;
+    for (size_t i = 0; dehumidifier_chars[i]; i++) {
+        if (dehumidifier_chars[i] == &cha_dehumidifier_threshold) {
+            dehumidifier_chars[i] = NULL;
+            return;
+        }
+    }
+}
 
 // Build the Accessory Database
 homekit_accessory_t *accessories[] = {
@@ -79,15 +117,7 @@ homekit_accessory_t *accessories[] = {
             &cha_ac_status_fault,
             NULL
         }),
-        HOMEKIT_SERVICE(HUMIDIFIER_DEHUMIDIFIER, .characteristics = (homekit_characteristic_t*[]) {
-            HOMEKIT_CHARACTERISTIC(NAME, "AC Dehumidifier"),
-            HOMEKIT_CHARACTERISTIC(CONFIGURED_NAME, "Dehumidifier"),
-            &cha_dehumidifier_active,
-            &cha_dehumidifier_current_state,
-            &cha_dehumidifier_target_state,
-            &cha_dehumidifier_current_humidity,
-            NULL
-        }),
+        HOMEKIT_SERVICE(HUMIDIFIER_DEHUMIDIFIER, .characteristics = dehumidifier_chars),
         NULL
     }),
     NULL
@@ -115,5 +145,8 @@ homekit_server_config_t config = {
     //   7 = v1.33: threshold min/max widened from 16-31 to 5-40. Nothing added
     //       or removed, but iOS caches the declared range as part of the schema
     //   8 = v1.36: reverted to 16-31, which is what TEMP_MAP can express
-    .config_number = 8
+    //   9 = v1.41: added cha_dehumidifier_threshold to HUMIDIFIER_DEHUMIDIFIER
+    //  10 = v1.42: threshold now gated by HUMIDITY_UNITS, so the database
+    //       differs per unit; both variants ship 10.
+    .config_number = 10
 };

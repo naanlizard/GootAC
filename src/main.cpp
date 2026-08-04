@@ -246,9 +246,9 @@ void setup_webserver() {
   // guards, persistence), so it exercises the controller without an iOS
   // device. Same LAN trust model as /reboot; requires ?confirm=yes.
   // Fields: dehumidifier|active|swing (0/1), mode (0 AUTO,1 HEAT,2 COOL),
-  // heat|cool (16..31 C). Applied in fixed order dehumidifier, active, mode,
-  // heat, cool, swing, so dehumidifier=0&active=1 cannot leave a transient
-  // OFF target. All-or-nothing: any invalid value applies nothing.
+  // heat|cool (16..31 C), humidity|humidity_threshold (0..100 %). Applied in
+  // FIELDS order, so dehumidifier=0&active=1 cannot leave a transient OFF
+  // target. All-or-nothing: any invalid value applies nothing.
   server.on("/control", HTTP_GET, []() {
     if (server.arg("confirm") != "yes") {
       server.send(400, "application/json",
@@ -273,7 +273,7 @@ void setup_webserver() {
         {"dehumidifier", 0, 1, true}, {"active", 0, 1, true},
         {"mode", 0, 2, true},         {"heat", 16, 31, false},
         {"cool", 16, 31, false},      {"swing", 0, 1, true},
-        {"humidity", 0, 100, false},
+        {"humidity", 0, 100, false},  {"humidity_threshold", 0, 100, false},
     };
     constexpr int NFIELD = sizeof(FIELDS) / sizeof(FIELDS[0]);
     float vals[NFIELD];
@@ -322,19 +322,21 @@ void setup_webserver() {
         case 3: set_ac_heating_threshold(v); break;
         case 4: set_ac_cooling_threshold(v); break;
         case 5: set_ac_swing_mode(v); break;
+        case 7: set_dehumidifier_threshold(v); break;
       }
     }
     // Echo the resulting target mirrors so guard-dropped writes are visible.
-    char hBuf[10], cBuf[10], body[160];
+    char hBuf[10], cBuf[10], tBuf[10], body[192];
     dtostrf(cha_ac_heating_threshold.value.float_value, 1, 1, hBuf);
     dtostrf(cha_ac_cooling_threshold.value.float_value, 1, 1, cBuf);
+    dtostrf(cha_dehumidifier_threshold.value.float_value, 1, 0, tBuf);
     snprintf(body, sizeof(body),
              "{\"ok\":true,\"active\":%u,\"mode\":%u,\"heat\":%s,\"cool\":%s,"
-             "\"swing\":%u,\"dehumidifier\":%u}",
+             "\"swing\":%u,\"dehumidifier\":%u,\"humidity_threshold\":%s}",
              cha_ac_active.value.uint8_value,
              cha_ac_target_state.value.uint8_value, hBuf, cBuf,
              cha_ac_swing_mode.value.uint8_value,
-             cha_dehumidifier_active.value.uint8_value);
+             cha_dehumidifier_active.value.uint8_value, tBuf);
     server.send(200, "application/json", body);
   });
 

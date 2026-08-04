@@ -2,6 +2,7 @@
 
 #include <homekit/homekit.h>
 #include <homekit/characteristics.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,12 +31,15 @@ extern homekit_characteristic_t cha_ac_status_fault;
 extern homekit_characteristic_t cha_dehumidifier_active;
 extern homekit_characteristic_t cha_dehumidifier_current_state;
 extern homekit_characteristic_t cha_dehumidifier_target_state;
-// Current Relative Humidity — required by HAP for the
-// HumidifierDehumidifier service. The CN105 protocol on this hardware
-// does not expose a humidity reading, so this is a fixed 50% stub:
-// the characteristic must exist for the service to be valid in iOS
-// Home but the value is not meaningful.
+// The CN105 reports no humidity, so both of these are fed from outside:
+// current from /control?humidity=, target from HomeKit or /control.
 extern homekit_characteristic_t cha_dehumidifier_current_humidity;
+extern homekit_characteristic_t cha_dehumidifier_threshold;
+
+// True when DEVICE_NAME is in HUMIDITY_UNITS. The gate must run before
+// arduino_homekit_setup(); after that the server has read the database.
+bool device_has_humidity_feed(void);
+void homekit_ac_apply_humidity_gate(void);
 
 #ifdef __cplusplus
 }
