@@ -62,6 +62,20 @@ static const char *STATE_FILE = "/target_state.bin";
 static DecisionState  g_decision_state;
 static DecisionOutput g_last_decision;
 
+static CompGateState g_comp_gate;
+static bool g_comp_deferred = false;   // last tick deferred a signature change; for /metrics
+
+// Signature of what the hardware reports right now. Unknown mode maps to the
+// AUTO class so the gate stays conservative on anything unrecognized.
+static uint8_t hw_comp_sig() {
+  heatpumpSettings s = hp->getSettings();
+  bool on = s.power && strcmp(s.power, "ON") == 0;
+  uint8_t idx = 4;
+  for (uint8_t i = 0; i < 5; i++)
+    if (s.mode && strcmp(s.mode, hp->MODE_MAP[i]) == 0) { idx = i; break; }
+  return comp_sig(on, idx);
+}
+
 static uint8_t g_fan_target_idx = 0;   // last commanded fan index, for /metrics
 static float   g_control_delta_c = 0.0f;
 
@@ -478,6 +492,29 @@ void update_physical_ac() {
   g_fan_target_idx = dout.fan_idx;
   g_control_delta_c = dout.control_delta_c;
 
+  // Compressor gate: seed once from the library's view (self-corrects via the
+  // external-sync observe within one settings poll; boot counts as a transition
+  // so a crash loop cannot bypass the dwell), then admit or defer. Deferral
+  // sends nothing; the unit holds its last commanded state.
+  if (g_comp_gate.sig == COMP_SIG_NONE) {
+    g_comp_gate.sig = hw_comp_sig();
+    g_comp_gate.since = din.now_ms;
+  }
+  {
+    uint8_t sig = comp_sig(dout.power, dout.mode);
+    if (!comp_gate_admit(g_comp_gate, sig, pending_update, din.now_ms)) {
+      if (!g_comp_deferred)
+        GLOG_INFO("MITSUBISHI", "Compressor gate: deferring sig %u -> %u (%us into dwell)",
+                  g_comp_gate.sig, sig,
+                  (unsigned)((din.now_ms - g_comp_gate.since) / 1000));
+      g_comp_deferred = true;
+      return;
+    }
+    if (g_comp_deferred)
+      GLOG_INFO("MITSUBISHI", "Compressor gate: dwell over, applying sig %u", sig);
+    g_comp_deferred = false;
+  }
+
   bool target_active = din.active;
   uint8_t hk_target_mode = din.target_mode;
   float roomTemp = din.room_temp;
@@ -638,6 +675,7 @@ void ac_controller_sync_from_ac() {
   // 2. Handle External Overrides (IR Remote / Physical Buttons)
   if (isExternal) {
     GLOG_INFO("MITSUBISHI", "External interaction detected! Syncing Intent...");
+    comp_gate_observe_external(g_comp_gate, hw_comp_sig(), millis());
 
     // Sync Power -> Active
     uint8_t physActive = (strcmp(s.power, "ON") == 0) ? 1 : 0;
@@ -839,6 +877,10 @@ void ac_controller_write_metrics(Print& out) {
     m_i(out, F("gootac_decided_mode_index"), F("Last decision: MODE_MAP index (0 HEAT,1 DRY,2 COOL,3 FAN,4 AUTO); meaningful only when decided power=1."), g_last_decision.mode);
     m_f(out, F("gootac_decided_temp_celsius"), F("Last decision: setpoint in Celsius; not commanded when mode index=3."), g_last_decision.temp);
     m_i(out, F("gootac_sa_mode"), F("Smart-Auto direction memory: -1 uninit, 0 HEAT, 2 COOL, 3 FAN deadband."), g_decision_state.sa_mode);
+    m_i(out, F("gootac_comp_applied_sig"), F("Compressor gate: last applied/observed signature (0 idle, 1 cool-dir, 2 heat, 3 auto, 255 unseeded)."), g_comp_gate.sig);
+    m_i(out, F("gootac_comp_decided_sig"), F("Compressor gate: signature of the current decision."), comp_sig(g_last_decision.power, g_last_decision.mode));
+    m_b(out, F("gootac_comp_deferred"), F("1 while the gate is holding a decided signature change back."), g_comp_deferred);
+    m_u(out, F("gootac_comp_sig_age_seconds"), F("Seconds since the last applied/observed compressor signature change."), g_comp_gate.sig == COMP_SIG_NONE ? 0 : (uint32_t)((millis() - g_comp_gate.since) / 1000));
     m_b(out, F("gootac_ac_filter_dirty"),     F("1 if the AC reports the filter needs cleaning, else 0."),          (st.statusFlags & HP_STATUS_FILTER_DIRTY) != 0);
     m_b(out, F("gootac_ac_defrost_active"),   F("1 if the AC is defrosting, else 0."),                              (st.statusFlags & HP_STATUS_DEFROST) != 0);
     m_b(out, F("gootac_ac_preheat_active"),   F("1 if the AC is preheating, else 0."),                              (st.statusFlags & HP_STATUS_PREHEAT) != 0);

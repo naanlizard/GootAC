@@ -71,3 +71,33 @@ uint8_t fan_index_for_delta(float delta);
 // Deterministic, zero side effects: same (input, pre-state) always yields the
 // same (output, post-state).
 DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state);
+
+// Compressor gate: classifies what a commanded (power, mode) pair asks of the
+// compressor. DRY and COOL share a direction; AUTO's direction is the unit's
+// own choice, so crossing its boundary is treated as a potential reversal.
+enum : uint8_t {
+  COMP_SIG_IDLE = 0,   // off, or FAN
+  COMP_SIG_COOL = 1,   // COOL or DRY
+  COMP_SIG_HEAT = 2,
+  COMP_SIG_AUTO = 3,   // native AUTO (blind fallback, or observed from hardware)
+  COMP_SIG_NONE = 0xFF,
+};
+// >= the typical 3-min compressor restart delay with margin; also >= the 5-min
+// humidity push cadence so the dehumidify latch cannot flap faster than the gate.
+constexpr uint32_t COMP_MIN_DWELL_MS = 300000;
+
+uint8_t comp_sig(bool power, uint8_t mode_idx);
+
+struct CompGateState {
+  uint8_t  sig   = COMP_SIG_NONE;  // last applied/observed signature
+  uint32_t since = 0;              // when it changed (millis domain)
+};
+
+// True = apply and record; false = defer (caller sends nothing this tick).
+// `since` moves only on an applied change, so consecutive applied transitions
+// are >= COMP_MIN_DWELL_MS apart and a flapping decision cannot postpone its
+// own application.
+bool comp_gate_admit(CompGateState& st, uint8_t sig, bool user_write, uint32_t now_ms);
+
+// An IR/panel transition is a compressor transition: record it and restart the dwell.
+void comp_gate_observe_external(CompGateState& st, uint8_t sig, uint32_t now_ms);

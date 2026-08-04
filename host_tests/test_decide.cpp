@@ -12,6 +12,7 @@
 //   J - a call always releases into the idle band, never into the opposite call
 //   K - normalize_thresholds: the only guard on restored/migrated flash state
 //   L - fan rung hysteresis: a room on a boundary must not move the fan
+//   M - compressor gate: signature map, dwell, user bypass, external observe
 #include "ac_decision.h"
 #include <math.h>
 #include <stdint.h>
@@ -816,6 +817,91 @@ static void group_l_rung_hysteresis() {
   }
 }
 
+// Group M - compressor gate. Policy is pure (comp_sig/admit/observe); the
+// controller only seeds from hardware and routes pending_update as user_write.
+static void group_m_comp_gate() {
+  // Signature map: all 5 modes x power.
+  CHECK_EQI(comp_sig(false, 0), COMP_SIG_IDLE);
+  CHECK_EQI(comp_sig(false, 2), COMP_SIG_IDLE);
+  CHECK_EQI(comp_sig(true, 3), COMP_SIG_IDLE);   // FAN
+  CHECK_EQI(comp_sig(true, 0), COMP_SIG_HEAT);
+  CHECK_EQI(comp_sig(true, 1), COMP_SIG_COOL);   // DRY: same direction as COOL
+  CHECK_EQI(comp_sig(true, 2), COMP_SIG_COOL);
+  CHECK_EQI(comp_sig(true, 4), COMP_SIG_AUTO);
+
+  // Seeded boot: first autonomous change deferred until dwell from seed;
+  // deferral mutates nothing; >= boundary admits.
+  {
+    CompGateState g; g.sig = COMP_SIG_COOL; g.since = 1000;
+    CHECK(!comp_gate_admit(g, COMP_SIG_IDLE, false, 1000 + COMP_MIN_DWELL_MS - 1));
+    CHECK(g.sig == COMP_SIG_COOL && g.since == 1000);
+    CHECK(comp_gate_admit(g, COMP_SIG_IDLE, false, 1000 + COMP_MIN_DWELL_MS));
+    CHECK(g.sig == COMP_SIG_IDLE && g.since == 1000 + COMP_MIN_DWELL_MS);
+  }
+
+  // Same-sig steady state never refreshes since: dwell measures the last
+  // transition, so a flapping decision cannot postpone its own application.
+  {
+    CompGateState g; g.sig = COMP_SIG_HEAT; g.since = 5;
+    CHECK(comp_gate_admit(g, COMP_SIG_HEAT, false, 400000));
+    CHECK(g.since == 5);
+  }
+
+  // Flap during deferral: A applied, B deferred, back to A (no-op), B admits
+  // exactly at dwell from A's application. Unseeded first apply records.
+  {
+    CompGateState g;
+    CHECK(comp_gate_admit(g, COMP_SIG_HEAT, false, 100));
+    CHECK(!comp_gate_admit(g, COMP_SIG_IDLE, false, 60100));
+    CHECK(comp_gate_admit(g, COMP_SIG_HEAT, false, 65100));
+    CHECK(g.since == 100);
+    CHECK(!comp_gate_admit(g, COMP_SIG_IDLE, false, 100 + COMP_MIN_DWELL_MS - 1));
+    CHECK(comp_gate_admit(g, COMP_SIG_IDLE, false, 100 + COMP_MIN_DWELL_MS));
+  }
+
+  // User write bypasses and records: the dwell restarts from the user action,
+  // re-arming against the next autonomous flip.
+  {
+    CompGateState g; g.sig = COMP_SIG_IDLE; g.since = 0;
+    CHECK(comp_gate_admit(g, COMP_SIG_COOL, true, 1000));
+    CHECK(g.sig == COMP_SIG_COOL && g.since == 1000);
+    CHECK(!comp_gate_admit(g, COMP_SIG_HEAT, false, 2000));
+  }
+
+  // External IR transition restarts the dwell; the decision divergence that
+  // follows (Smart Auto still wanting the old mode) defers instead of reverting.
+  {
+    CompGateState g; g.sig = COMP_SIG_COOL; g.since = 0;
+    comp_gate_observe_external(g, COMP_SIG_HEAT, 400000);
+    CHECK(g.sig == COMP_SIG_HEAT && g.since == 400000);
+    CHECK(!comp_gate_admit(g, COMP_SIG_COOL, false, 400000 + 5000));
+    CHECK(comp_gate_admit(g, COMP_SIG_COOL, false, 400000 + COMP_MIN_DWELL_MS));
+  }
+
+  // Re-observing the same external state is a no-op.
+  {
+    CompGateState g; g.sig = COMP_SIG_HEAT; g.since = 7;
+    comp_gate_observe_external(g, COMP_SIG_HEAT, 900000);
+    CHECK(g.since == 7);
+  }
+
+  // millis wrap: since near UINT32_MAX, now past zero.
+  {
+    CompGateState g; g.sig = COMP_SIG_COOL; g.since = 0xFFFFFF00u;
+    CHECK(!comp_gate_admit(g, COMP_SIG_IDLE, false, 0x00000100u));
+    CHECK(comp_gate_admit(g, COMP_SIG_IDLE, false, 0xFFFFFF00u + COMP_MIN_DWELL_MS));
+  }
+
+  // AUTO boundary is gated both directions: native AUTO compresses in a
+  // direction the firmware cannot see, so crossing it may be a reversal.
+  {
+    CompGateState g; g.sig = COMP_SIG_HEAT; g.since = 0;
+    CHECK(!comp_gate_admit(g, COMP_SIG_AUTO, false, 1000));
+    CHECK(comp_gate_admit(g, COMP_SIG_AUTO, false, COMP_MIN_DWELL_MS));
+    CHECK(!comp_gate_admit(g, COMP_SIG_COOL, false, COMP_MIN_DWELL_MS + 1000));
+  }
+}
+
 int main() {
   group_a_fan_curve();
   group_b_edge_cases();
@@ -829,6 +915,7 @@ int main() {
   group_j_no_reversal();
   group_k_normalize();
   group_l_rung_hysteresis();
+  group_m_comp_gate();
   printf("%d checks, %d failures\n", g_checks, g_fails);
   return g_fails ? 1 : 0;
 }

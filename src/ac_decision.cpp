@@ -143,3 +143,22 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
 
   return out;
 }
+
+uint8_t comp_sig(bool power, uint8_t mode_idx) {
+  if (!power || mode_idx == 3) return COMP_SIG_IDLE;
+  if (mode_idx == 0) return COMP_SIG_HEAT;
+  if (mode_idx == 4) return COMP_SIG_AUTO;
+  return COMP_SIG_COOL;  // 1 DRY, 2 COOL
+}
+
+bool comp_gate_admit(CompGateState& st, uint8_t sig, bool user_write, uint32_t now_ms) {
+  if (sig != st.sig && st.sig != COMP_SIG_NONE && !user_write &&
+      now_ms - st.since < COMP_MIN_DWELL_MS)
+    return false;
+  if (sig != st.sig) { st.sig = sig; st.since = now_ms; }
+  return true;
+}
+
+void comp_gate_observe_external(CompGateState& st, uint8_t sig, uint32_t now_ms) {
+  if (sig != st.sig) { st.sig = sig; st.since = now_ms; }
+}
