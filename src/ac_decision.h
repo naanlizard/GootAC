@@ -6,9 +6,10 @@
 
 // FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4" (25/50/75/100%).
 constexpr uint8_t  FAN_IDX_MIN      = 1;
-// Below about 1.71 the 25% rung falls entirely between points of the 0.5C grid
-// that the room reading and the setpoint share, so it can never be commanded.
-constexpr float    FAN_RAMP_SPAN_C  = 3.0f;
+constexpr uint8_t  FAN_IDX_LOW      = 2;      // final-approach rung
+constexpr uint8_t  FAN_IDX_MAX      = 5;
+// More than this over the commanded target runs the fan at 100%.
+constexpr float    FAN_MAX_OVER_C   = 0.5f;
 constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing down
 constexpr float    SENSOR_STEP_C    = 0.5f;   // CN105 reports room temp in 0.5C steps
 
@@ -19,7 +20,7 @@ constexpr float    AUTO_PULL_MIN_C  = 1.0f;
 constexpr float    AUTO_PULL_MAX_C  = 2.0f;
 
 // The target is both the commanded setpoint and the release point: the call ends
-// exactly when the room reaches it. Separating them costs the ramp its low rungs.
+// exactly when the room reaches it. Separating them costs the fan its low levels.
 float auto_pull_c(float heat_threshold, float cool_threshold);
 float auto_cool_target(float heat_threshold, float cool_threshold);  // cool - pull
 float auto_heat_target(float heat_threshold, float cool_threshold);  // heat + pull
@@ -52,7 +53,7 @@ struct DecisionInput {
 // Cross-tick memory. Reset only at boot.
 struct DecisionState {
   int8_t   sa_mode      = -1; // -1 uninit; 0=HEAT, 2=COOL, 3=idle band
-  uint8_t  last_fan_idx = 0;  // FAN_MAP index of last ramp-commanded fan
+  uint8_t  last_fan_idx = 0;  // FAN_MAP index of the last commanded fan level
   uint32_t lower_since  = 0;  // 0 = no step-down pending
 };
 

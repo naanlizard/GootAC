@@ -55,7 +55,7 @@ static HeatPump *hp;
 static TargetState currentState;
 static const char *STATE_FILE = "/target_state.bin";
 
-// Decision core (mode/setpoint/fan-ramp logic + tuning constants) lives in
+// Decision core (mode/setpoint/fan logic + tuning constants) lives in
 // ac_decision.h/.cpp so the host test harness can exercise it. These statics
 // are the controller's single cross-tick DecisionState plus the last outputs,
 // kept for /metrics.
@@ -523,7 +523,7 @@ void update_physical_ac() {
   bool hpPower = dout.power;
   uint8_t hpMode = dout.mode; // Library Index: 0:HEAT, 1:DRY, 2:COOL, 3:FAN, 4:AUTO
   float hpTemp = dout.temp;
-  // Fan target comes straight from ac_decide()'s multi-level ramp; 0 delegates
+  // Fan target comes straight from ac_decide()'s two-level policy; 0 delegates
   // to the unit's native AUTO. g_fan_target_idx was already set from dout above.
   uint8_t fan_idx = dout.fan_idx;
 
@@ -565,7 +565,7 @@ void update_physical_ac() {
     hp->setFanSpeedIndex(5); // 4 (Max)
   } else {
     hp->setVaneIndex(currentState.swing_mode == 1 ? 6 : 0); // 6:SWING, 0:AUTO
-    // Fan driven by ac_decide()'s ramp; 0 = delegate to AUTO.
+    // Fan driven by ac_decide(); 0 = delegate to AUTO.
     hp->setFanSpeedIndex(fan_idx);
   }
 
@@ -871,7 +871,7 @@ void ac_controller_write_metrics(Print& out) {
     m_b(out, F("gootac_swing_mode"),    F("1 if vane swing is enabled, else 0."),                      currentState.swing_mode != 0);
     m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
     m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 1=QUIET, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_fan_target_idx);
-    m_f(out, F("gootac_control_delta_celsius"), F("Room-vs-setpoint demand delta driving the fan ramp: >0 still needs conditioning, <0 past setpoint; 0 when idle."), g_control_delta_c);
+    m_f(out, F("gootac_control_delta_celsius"), F("Room-vs-setpoint demand delta driving the fan level: >0 still needs conditioning, <0 past setpoint; 0 when idle."), g_control_delta_c);
     m_b(out, F("gootac_dehumidifier_active"), F("1 if the HomeKit dehumidifier service is targeted on, else 0."), currentState.dehumidifier != 0);
     m_b(out, F("gootac_decided_power"), F("Last decision: 1 if the unit should be powered on."), g_last_decision.power);
     m_i(out, F("gootac_decided_mode_index"), F("Last decision: MODE_MAP index (0 HEAT,1 DRY,2 COOL,3 FAN,4 AUTO); meaningful only when decided power=1."), g_last_decision.mode);

@@ -49,16 +49,12 @@ float auto_heat_target(float heat_threshold, float cool_threshold) {
   return heat_threshold + auto_pull_c(heat_threshold, cool_threshold);
 }
 
-// Exponential ramp, QUIET at or below setpoint to 100% at FAN_RAMP_SPAN_C. This
-// is the raw curve; the rung hysteresis in ac_decide gates which steps are taken.
+// Two-level policy: 100% whenever the room is more than FAN_MAX_OVER_C past the
+// commanded setpoint, one low rung for the last half-degree, QUIET at/below.
 uint8_t fan_index_for_delta(float delta) {
-  if (delta <= 0.0f) return FAN_IDX_MIN;   // at/below setpoint -> QUIET
-  float x = delta / FAN_RAMP_SPAN_C;
-  if (x > 1.0f) x = 1.0f;
-  int step = (int)lroundf(0.25f * powf(4.0f, x) * 4.0f); // 1..4
-  if (step < 1) step = 1;
-  if (step > 4) step = 4;
-  return (uint8_t)(step + 1);                            // 2..5
+  if (delta > FAN_MAX_OVER_C) return FAN_IDX_MAX;
+  if (delta > 0.0f) return FAN_IDX_LOW;
+  return FAN_IDX_MIN;
 }
 
 DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
@@ -113,17 +109,12 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
     bool room_known = (in.room_temp > 1.0f);
     if (out.power && room_known && (out.mode == 2 || out.mode == 0)) {
       // Against the commanded setpoint, which in Smart Auto is also the release
-      // point, so the ramp reaches its bottom rung exactly as the call ends.
+      // point, so the fan reaches its floor exactly as the call ends.
       float delta = (out.mode == 2) ? (in.room_temp - out.temp)
                                     : (out.temp - in.room_temp);
       uint8_t desired = fan_index_for_delta(delta);
-      // A step up must clear the rung by a whole sensor step. The room moves in
-      // 0.5C jumps, so one parked on a boundary would raise the fan every tick
-      // and cancel the pending step-down on the next, forever.
-      if (desired > state.last_fan_idx &&
-          fan_index_for_delta(delta - SENSOR_STEP_C) <= state.last_fan_idx)
-        desired = state.last_fan_idx;
-      // Ramp up at once; ease down only after sustained lower demand.
+      // Up at once; down only after sustained lower demand, which rate-bounds
+      // the packet chatter from a reading dithering across a level boundary.
       if (state.last_fan_idx < FAN_IDX_MIN || desired > state.last_fan_idx) {
         state.last_fan_idx = desired; state.lower_since = 0;
       } else if (desired < state.last_fan_idx) {
