@@ -49,12 +49,13 @@ float auto_heat_target(float heat_threshold, float cool_threshold) {
   return heat_threshold + auto_pull_c(heat_threshold, cool_threshold);
 }
 
-// Two-level policy: 100% whenever the room is more than FAN_MAX_OVER_C past the
-// commanded setpoint, one low rung for the last half-degree, QUIET at/below.
+// 100% until the room reaches the commanded target; past it, one rung down per
+// SENSOR_STEP_C of depth, so circulation continues while the room coasts.
 uint8_t fan_index_for_delta(float delta) {
-  if (delta > FAN_MAX_OVER_C) return FAN_IDX_MAX;
-  if (delta > 0.0f) return FAN_IDX_LOW;
-  return FAN_IDX_MIN;
+  if (delta > 0.0f) return FAN_IDX_MAX;
+  const int steps_past = (int)floorf(-delta / SENSOR_STEP_C);  // 0 at the target
+  const int idx = (int)FAN_IDX_MAX - 1 - steps_past;
+  return idx < (int)FAN_IDX_MIN ? FAN_IDX_MIN : (uint8_t)idx;
 }
 
 DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
@@ -107,11 +108,20 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
   // --- Fan target: GootAC drives the fan directly. 0 = delegate to unit AUTO. ---
   {
     bool room_known = (in.room_temp > 1.0f);
-    if (out.power && room_known && (out.mode == 2 || out.mode == 0)) {
-      // Against the commanded setpoint, which in Smart Auto is also the release
-      // point, so the fan reaches its floor exactly as the call ends.
-      float delta = (out.mode == 2) ? (in.room_temp - out.temp)
-                                    : (out.temp - in.room_temp);
+    bool call = out.power && room_known && (out.mode == 2 || out.mode == 0);
+    bool idle_fan = out.power && room_known && out.mode == 3;
+    if (call || idle_fan) {
+      float delta;
+      if (call) {
+        delta = (out.mode == 2) ? (in.room_temp - out.temp)
+                                : (out.temp - in.room_temp);
+      } else {
+        // Idle band: depth past the nearer target, so the wind-down continues
+        // across a release and winds back up approaching either threshold.
+        const float dc = in.room_temp - auto_cool_target(in.heat_threshold, in.cool_threshold);
+        const float dh = auto_heat_target(in.heat_threshold, in.cool_threshold) - in.room_temp;
+        delta = dc > dh ? dc : dh;
+      }
       uint8_t desired = fan_index_for_delta(delta);
       // Up at once; down only after sustained lower demand, which rate-bounds
       // the packet chatter from a reading dithering across a level boundary.
@@ -125,8 +135,6 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
       }
       out.fan_idx = state.last_fan_idx;
       out.control_delta_c = delta;
-    } else if (out.power && room_known && out.mode == 3) {
-      out.fan_idx = FAN_IDX_MIN; state.last_fan_idx = FAN_IDX_MIN; state.lower_since = 0; out.control_delta_c = 0.0f;
     } else {
       out.fan_idx = 0; state.last_fan_idx = 0; state.lower_since = 0; out.control_delta_c = 0.0f;
     }

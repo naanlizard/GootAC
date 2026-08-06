@@ -6,10 +6,7 @@
 
 // FAN_MAP indices: 0=AUTO, 1=QUIET, 2..5 = "1".."4" (25/50/75/100%).
 constexpr uint8_t  FAN_IDX_MIN      = 1;
-constexpr uint8_t  FAN_IDX_LOW      = 2;      // final-approach rung
 constexpr uint8_t  FAN_IDX_MAX      = 5;
-// More than this over the commanded target runs the fan at 100%.
-constexpr float    FAN_MAX_OVER_C   = 0.5f;
 constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing down
 constexpr float    SENSOR_STEP_C    = 0.5f;   // CN105 reports room temp in 0.5C steps
 
@@ -20,7 +17,8 @@ constexpr float    AUTO_PULL_MIN_C  = 1.0f;
 constexpr float    AUTO_PULL_MAX_C  = 2.0f;
 
 // The target is both the commanded setpoint and the release point: the call ends
-// exactly when the room reaches it. Separating them costs the fan its low levels.
+// exactly when the room reaches it, and the idle staircase picks up at the same
+// depth, so the fan hands over continuously across the release.
 float auto_pull_c(float heat_threshold, float cool_threshold);
 float auto_cool_target(float heat_threshold, float cool_threshold);  // cool - pull
 float auto_heat_target(float heat_threshold, float cool_threshold);  // heat + pull

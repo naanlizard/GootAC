@@ -9,7 +9,7 @@
 // DEVICE_NAME: Human-readable name for this unit (e.g., "Bedroom", "Suite")
 // Firmware derives: hostname "GootAC-Bedroom", accessory name "Bedroom AC"
 #define DEVICE_NAME    "Bedroom"
-#define FW_VERSION     "1.44"
+#define FW_VERSION     "1.45"
 
 // Units with an external humidity feed (HomePod automation pushing to
 // /control?humidity=). Only these publish the HomeKit target-humidity slider.
