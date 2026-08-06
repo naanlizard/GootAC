@@ -4,15 +4,10 @@
 float auto_pull_c(float heat_threshold, float cool_threshold) {
   const float range = cool_threshold - heat_threshold;
   if (range <= 0.0f) return 0.0f;
-  float pull = range * AUTO_PULL_FRAC;
-  if (pull < AUTO_PULL_MIN_C) pull = AUTO_PULL_MIN_C;
-  if (pull > AUTO_PULL_MAX_C) pull = AUTO_PULL_MAX_C;
-  pull = SENSOR_STEP_C * roundf(pull / SENSOR_STEP_C);
   // Past half the range the targets cross, so releasing one call lands inside
   // the other and the unit reverses instead of idling. Floored onto the grid.
   const float half = SENSOR_STEP_C * floorf((range * 0.5f) / SENSOR_STEP_C);
-  if (pull > half) pull = half;
-  return pull;
+  return AUTO_PULL_C > half ? half : AUTO_PULL_C;
 }
 
 bool normalize_thresholds(float &heat, float &cool, float lo, float hi,
@@ -42,11 +37,17 @@ bool normalize_thresholds(float &heat, float &cool, float lo, float hi,
 }
 
 float auto_cool_target(float heat_threshold, float cool_threshold) {
-  return cool_threshold - auto_pull_c(heat_threshold, cool_threshold);
+  float t = cool_threshold - auto_pull_c(heat_threshold, cool_threshold);
+  if (t < TEMP_CMD_MIN_C) t = TEMP_CMD_MIN_C;
+  if (t > TEMP_CMD_MAX_C) t = TEMP_CMD_MAX_C;
+  return t;
 }
 
 float auto_heat_target(float heat_threshold, float cool_threshold) {
-  return heat_threshold + auto_pull_c(heat_threshold, cool_threshold);
+  float t = heat_threshold + auto_pull_c(heat_threshold, cool_threshold);
+  if (t < TEMP_CMD_MIN_C) t = TEMP_CMD_MIN_C;
+  if (t > TEMP_CMD_MAX_C) t = TEMP_CMD_MAX_C;
+  return t;
 }
 
 // 100% until the room reaches the commanded target; past it, one rung down per
@@ -68,10 +69,35 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
 
   // Decision Logic
   if (in.active) {
-    if (in.target_mode == 1) { // HEAT
-      out.power = true; out.mode = 0; out.temp = in.heat_threshold;
-    } else if (in.target_mode == 2) { // COOL
-      out.power = true; out.mode = 2; out.temp = in.cool_threshold;
+    if (in.target_mode == 1) { // HEAT: one-sided call cycle
+      if (in.room_temp > 1.0) {
+        const float heat_target = auto_heat_target(in.heat_threshold, in.cool_threshold);
+        if (state.sa_mode == 0) {
+          if (in.room_temp >= heat_target) state.sa_mode = 3;
+        } else {
+          state.sa_mode = (in.room_temp < in.heat_threshold) ? 0 : 3;
+        }
+        out.power = true;
+        out.mode  = (state.sa_mode == 0) ? 0 : (in.dehumidify ? 1 : 3);
+        out.temp  = heat_target;
+      } else {
+        // Room unknown: no cycle to run, hand the unit its own thermostat.
+        out.power = true; out.mode = 0; out.temp = in.heat_threshold;
+      }
+    } else if (in.target_mode == 2) { // COOL: one-sided call cycle
+      if (in.room_temp > 1.0) {
+        const float cool_target = auto_cool_target(in.heat_threshold, in.cool_threshold);
+        if (state.sa_mode == 2) {
+          if (in.room_temp <= cool_target) state.sa_mode = 3;
+        } else {
+          state.sa_mode = (in.room_temp > in.cool_threshold) ? 2 : 3;
+        }
+        out.power = true;
+        out.mode  = (state.sa_mode == 2) ? 2 : (in.dehumidify ? 1 : 3);
+        out.temp  = cool_target;
+      } else {
+        out.power = true; out.mode = 2; out.temp = in.cool_threshold;
+      }
     } else if (in.target_mode == 0) { // Smart Auto
       if (in.room_temp > 1.0) {
         const float cool_target = auto_cool_target(in.heat_threshold, in.cool_threshold);
@@ -116,11 +142,13 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
         delta = (out.mode == 2) ? (in.room_temp - out.temp)
                                 : (out.temp - in.room_temp);
       } else {
-        // Idle band: depth past the nearer target, so the wind-down continues
-        // across a release and winds back up approaching either threshold.
+        // Idle band: depth past the target, so the wind-down continues across
+        // a release. Auto anchors on the nearer side; explicit on its own.
         const float dc = in.room_temp - auto_cool_target(in.heat_threshold, in.cool_threshold);
         const float dh = auto_heat_target(in.heat_threshold, in.cool_threshold) - in.room_temp;
-        delta = dc > dh ? dc : dh;
+        delta = (in.target_mode == 2) ? dc
+              : (in.target_mode == 1) ? dh
+              : (dc > dh ? dc : dh);
       }
       uint8_t desired = fan_index_for_delta(delta);
       // Up at once; down only after sustained lower demand, which rate-bounds

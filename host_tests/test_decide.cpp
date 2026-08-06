@@ -4,10 +4,10 @@
 //   B - single-tick edge cases (current-state doc §9, decide()-domain only)
 //   C - Smart-Auto hysteresis sequences
 //   D - fan step-down timing (boundary, wrap, sentinel quirk)
-//   E - oracle equivalence sweep vs the a805f40 reference (explicit modes only)
+//   E - oracle equivalence sweep vs the parallel reference implementation
 //   F - determinism
 //   G - dehumidify as an idle-band toggle
-//   H - Smart-Auto pull/target table across range widths
+//   H - pull/target table across range widths
 //   I - fan levels inside Smart Auto: max to target, wind-down past it
 //   J - a call always releases into the idle band, never into the opposite call
 //   K - normalize_thresholds: the only guard on restored/migrated flash state
@@ -66,9 +66,10 @@ static DecisionInput mkin(bool active, uint8_t mode, float heat, float cool,
 }
 
 // ---------------------------------------------------------------------------
-// Reference for the oracle sweep. The thermal decision for explicit HEAT/COOL
-// is a805f40's, extracted into ref_extract_a805f40.txt; check-ref only proves
-// that extract still matches git, never that this function does.
+// Reference for the oracle sweep. The explicit HEAT/COOL thermal decision is a
+// parallel implementation of the one-sided call cycle, written from the spec;
+// the a805f40 extract lineage (ref_extract_a805f40.txt, check-ref) now covers
+// only the step-down machinery.
 //
 // The fan block is a parallel implementation of the live staircase (including
 // the idle-band branch), not a frozen a805f40 extract. It catches damage to
@@ -89,20 +90,31 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
   float hpTemp = 21.0;
 
   // Decision Logic
-  if (dehumidify) {
-    hpPower = true; hpMode = 1; // DRY
+  if (dehumidify && !target_active) {
+    hpPower = true; hpMode = 1; // standalone DRY
   } else if (target_active) {
-    if (hk_target_mode == 1) { // HEAT
-      hpPower = true; hpMode = 0; hpTemp = heatThr;
-    } else if (hk_target_mode == 2) { // COOL
-      hpPower = true; hpMode = 2; hpTemp = coolThr;
+    if (hk_target_mode == 1) { // HEAT: one-sided call cycle
+      if (roomTemp > 1.0f) {
+        const float ht = auto_heat_target(heatThr, coolThr);
+        if (sa_mode == 0) { if (roomTemp >= ht) sa_mode = 3; }
+        else sa_mode = (roomTemp < heatThr) ? 0 : 3;
+        hpPower = true; hpMode = (sa_mode == 0) ? 0 : (dehumidify ? 1 : 3);
+        hpTemp = ht;
+      } else { hpPower = true; hpMode = 0; hpTemp = heatThr; }
+    } else if (hk_target_mode == 2) { // COOL: one-sided call cycle
+      if (roomTemp > 1.0f) {
+        const float ct = auto_cool_target(heatThr, coolThr);
+        if (sa_mode == 2) { if (roomTemp <= ct) sa_mode = 3; }
+        else sa_mode = (roomTemp > coolThr) ? 2 : 3;
+        hpPower = true; hpMode = (sa_mode == 2) ? 2 : (dehumidify ? 1 : 3);
+        hpTemp = ct;
+      } else { hpPower = true; hpMode = 2; hpTemp = coolThr; }
     } else if (hk_target_mode == 0 && live) {
-      // Smart Auto: adopt the live decision verbatim, then let the frozen fan
-      // block below run on it. sa_mode is the live core's to own.
+      // Smart Auto: adopt the live decision verbatim, then let the fan block
+      // below run on it. sa_mode is the live core's to own for tm 0.
       hpPower = live->power; hpMode = live->mode; hpTemp = live->temp;
     }
   }
-  (void)sa_mode;
 
   uint8_t fan_idx = 0;
   float g_control_delta_c = 0.0f;
@@ -114,7 +126,9 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
       if (hpMode == 3) {
         const float dc = roomTemp - auto_cool_target(heatThr, coolThr);
         const float dh = auto_heat_target(heatThr, coolThr) - roomTemp;
-        delta = dc > dh ? dc : dh;
+        delta = (hk_target_mode == 2) ? dc
+              : (hk_target_mode == 1) ? dh
+              : (dc > dh ? dc : dh);
       } else {
         delta = (hpMode == 2) ? (roomTemp - hpTemp) : (hpTemp - roomTemp);
       }
@@ -182,8 +196,8 @@ static void group_b_edge_cases() {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(true, 0, 18, 30, false, 1.0625f, 1000), st);
     CHECK(o.power); CHECK_EQI(o.mode, 0);
-    CHECK_EQF(o.temp, 20.0f);   // heat 18 + pull 2.0 (range 12 caps at AUTO_PULL_MAX_C)
-    CHECK_EQI(st.sa_mode, 0); CHECK_EQI(o.fan_idx, 5); // delta 18.9 -> max
+    CHECK_EQF(o.temp, 18.5f);   // heat 18 + static pull 0.5
+    CHECK_EQI(st.sa_mode, 0); CHECK_EQI(o.fan_idx, 5); // delta 17.4 -> max
   }
   // §9.12-style: out-of-range-low sensor value still counts as "known".
   {
@@ -208,28 +222,42 @@ static void group_b_edge_cases() {
     CHECK_EQI(o.fan_idx, 0);
     CHECK_EQI(st.sa_mode, 2); CHECK_EQI(st.last_fan_idx, 0); CHECK_EQI(st.lower_since, 0);
   }
-  // Explicit COOL.
+  // Explicit COOL above the threshold: a call, driven to threshold - pull.
   {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(true, 2, 18, 25, false, 26.5f, 1000), st);
-    CHECK(o.power); CHECK_EQI(o.mode, 2); CHECK_EQF(o.temp, 25.0f);
-    CHECK_EQF(o.control_delta_c, 26.5f - 25.0f); CHECK_EQI(o.fan_idx, 5);
-    CHECK_EQI(st.sa_mode, -1); // explicit modes never touch sa_mode
+    CHECK(o.power); CHECK_EQI(o.mode, 2); CHECK_EQF(o.temp, 24.5f);
+    CHECK_EQF(o.control_delta_c, 26.5f - 24.5f); CHECK_EQI(o.fan_idx, 5);
+    CHECK_EQI(st.sa_mode, 2); // explicit modes run the same call cycle
   }
-  // Explicit HEAT.
+  // Explicit HEAT below the threshold: a call to threshold + pull.
   {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(true, 1, 27, 30, false, 26.5f, 1000), st);
-    CHECK(o.power); CHECK_EQI(o.mode, 0); CHECK_EQF(o.temp, 27.0f);
-    CHECK_EQF(o.control_delta_c, 27.0f - 26.5f); CHECK_EQI(o.fan_idx, 5);
+    CHECK(o.power); CHECK_EQI(o.mode, 0); CHECK_EQF(o.temp, 27.5f);
+    CHECK_EQF(o.control_delta_c, 27.5f - 26.5f); CHECK_EQI(o.fan_idx, 5);
+    CHECK_EQI(st.sa_mode, 0);
   }
-  // Negative delta preserved raw (explicit COOL with room below threshold).
+  // Release boundaries, pinned as literals independent of the oracle's
+  // parallel cycle: room exactly on the target releases (inclusive).
+  {
+    DecisionState st; st.sa_mode = 2;
+    DecisionOutput o = ac_decide(mkin(true, 2, 18, 25, false, 24.5f, 1000), st);
+    CHECK_EQI(o.mode, 3); CHECK_EQI(st.sa_mode, 3);
+  }
+  {
+    DecisionState st; st.sa_mode = 0;
+    DecisionOutput o = ac_decide(mkin(true, 1, 27, 30, false, 27.5f, 1000), st);
+    CHECK_EQI(o.mode, 3); CHECK_EQI(st.sa_mode, 3);
+  }
+  // Explicit COOL with the room already under the threshold idles in FAN;
+  // the one-sided wind-down runs on depth past the pull target.
   {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(true, 2, 18, 30, false, 26.5f, 1000), st);
-    CHECK(o.power); CHECK_EQI(o.mode, 2);
-    CHECK_EQF(o.control_delta_c, 26.5f - 30.0f); // == -3.5, NOT clamped
-    CHECK_EQI(o.fan_idx, 1);                     // past setpoint -> QUIET floor
+    CHECK(o.power); CHECK_EQI(o.mode, 3); CHECK_EQF(o.temp, 29.5f);
+    CHECK_EQF(o.control_delta_c, 26.5f - 29.5f); // depth -3.0, preserved raw
+    CHECK_EQI(o.fan_idx, 1); CHECK_EQI(st.sa_mode, 3);
   }
   // Smart-Auto deadband (uninit): FAN mode, temp carries the cooling target
   // (ignored by the caller when mode==3, pinned here so nobody "cleans it up").
@@ -237,9 +265,9 @@ static void group_b_edge_cases() {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(true, 0, 18, 30, false, 26.5f, 1000), st);
     CHECK(o.power); CHECK_EQI(o.mode, 3);
-    CHECK_EQF(o.temp, 28.0f);   // cool 30 - pull 2.0
-    // Idle delta: 1.5 shy of the cool target (nearer than the heat side).
-    CHECK_EQI(o.fan_idx, FAN_IDX_MIN); CHECK_EQF(o.control_delta_c, -1.5f);
+    CHECK_EQF(o.temp, 29.5f);   // cool 30 - static pull 0.5
+    // Idle delta: 3.0 shy of the cool target (nearer than the heat side).
+    CHECK_EQI(o.fan_idx, FAN_IDX_MIN); CHECK_EQF(o.control_delta_c, -3.0f);
     CHECK_EQI(st.sa_mode, 3); CHECK_EQI(st.last_fan_idx, FAN_IDX_MIN);
   }
   // Threshold-move-under-sticky-sa_mode (the attended HEAT-step shape):
@@ -250,7 +278,7 @@ static void group_b_edge_cases() {
     CHECK_EQI(st.sa_mode, 3);
     DecisionOutput o = ac_decide(mkin(true, 0, 27.5f, 30, false, 26.0f, 2000), st);
     CHECK_EQI(st.sa_mode, 0); CHECK(o.power); CHECK_EQI(o.mode, 0);
-    CHECK_EQF(o.temp, 28.5f);   // heat 27.5 + pull 1.0 (range 2.5 floors at AUTO_PULL_MIN_C)
+    CHECK_EQF(o.temp, 28.0f);   // heat 27.5 + static pull 0.5
     // and back down releases to the idle band (26.0 >= heat target 20.0)
     DecisionOutput o2 = ac_decide(mkin(true, 0, 18, 30, false, 26.0f, 3000), st);
     CHECK_EQI(st.sa_mode, 3); CHECK_EQI(o2.mode, 3);
@@ -264,23 +292,23 @@ static void group_c_hysteresis() {
   auto tick = [&](float room) {
     return ac_decide(mkin(true, 0, H, C, false, room, t += 5000), st);
   };
-  // Range 3.0 -> pull floors at AUTO_PULL_MIN_C: cool target 24.0, heat target 23.0.
-  CHECK_EQF(auto_cool_target(H, C), 24.0f);
-  CHECK_EQF(auto_heat_target(H, C), 23.0f);
+  // Static pull 0.5: cool target 24.5, heat target 22.5.
+  CHECK_EQF(auto_cool_target(H, C), 24.5f);
+  CHECK_EQF(auto_heat_target(H, C), 22.5f);
   tick(26.0f); CHECK_EQI(st.sa_mode, 2);   // uninit, room > cool -> COOL
-  tick(24.5f); CHECK_EQI(st.sa_mode, 2);   // holds: still above the cool target
-  tick(24.0f); CHECK_EQI(st.sa_mode, 3);   // reached the target -> released
-  tick(22.5f); CHECK_EQI(st.sa_mode, 3);   // idle band holds
+  tick(25.0f); CHECK_EQI(st.sa_mode, 2);   // holds: still above the cool target
+  tick(24.5f); CHECK_EQI(st.sa_mode, 3);   // reached the target -> released
+  tick(23.0f); CHECK_EQI(st.sa_mode, 3);   // idle band holds
   tick(21.9f); CHECK_EQI(st.sa_mode, 0);   // below heat -> HEAT
-  tick(22.5f); CHECK_EQI(st.sa_mode, 0);   // holds: still below the heat target
-  tick(23.0f); CHECK_EQI(st.sa_mode, 3);   // reached the target -> released
+  tick(22.0f); CHECK_EQI(st.sa_mode, 0);   // holds: still below the heat target
+  tick(22.5f); CHECK_EQI(st.sa_mode, 3);   // reached the target -> released
   tick(25.1f); CHECK_EQI(st.sa_mode, 2);   // above cool -> COOL
 
-  // Retention across an explicit-mode excursion (AUTO -> COOL -> AUTO).
-  (void)ac_decide(mkin(true, 2, H, C, false, 24.5f, t += 5000), st);
-  CHECK_EQI(st.sa_mode, 2); // untouched by explicit mode
-  DecisionOutput o = ac_decide(mkin(true, 0, H, C, false, 24.5f, t += 5000), st);
-  CHECK_EQI(o.mode, 2);     // still COOLing at 24.5 thanks to retained direction
+  // A running call carries across an explicit-mode flip: the cycle is shared.
+  (void)ac_decide(mkin(true, 2, H, C, false, 24.6f, t += 5000), st);
+  CHECK_EQI(st.sa_mode, 2); // still above the target: the call holds
+  DecisionOutput o = ac_decide(mkin(true, 0, H, C, false, 24.6f, t += 5000), st);
+  CHECK_EQI(o.mode, 2);     // and continues after returning to Smart Auto
 
   // Fresh state mid-deadband derives FAN from thresholds alone.
   DecisionState fresh;
@@ -296,7 +324,7 @@ static void group_d_ramp_timing() {
     // t0: high demand -> instant max.
     DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 28.0f, 1000), st);
     CHECK_EQI(o.fan_idx, 5);
-    // room coasts past the setpoint (desired 3): step-down arms, fan holds.
+    // release at the target: idle asks 75% (desired 4), step-down arms, fan holds.
     o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 10000), st);
     CHECK_EQI(o.fan_idx, 5); CHECK_EQI(st.lower_since, 10000);
     // 59,999 ms elapsed: still holding.
@@ -304,8 +332,8 @@ static void group_d_ramp_timing() {
     CHECK_EQI(o.fan_idx, 5);
     // 60,000 ms elapsed: drops to the CURRENT desired.
     o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 70000), st);
-    CHECK_EQI(o.fan_idx, 3); CHECK_EQI(st.lower_since, 0);
-    // any demand increase is instant.
+    CHECK_EQI(o.fan_idx, 4); CHECK_EQI(st.lower_since, 0);
+    // any demand increase is instant (28 re-triggers the call).
     o = ac_decide(mkin(true, 2, H, 25, false, 28.0f, 71000), st);
     CHECK_EQI(o.fan_idx, 5);
   }
@@ -313,14 +341,14 @@ static void group_d_ramp_timing() {
   {
     DecisionState st;
     (void)ac_decide(mkin(true, 2, H, 25, false, 28.0f, 1000), st);   // fan 5
-    (void)ac_decide(mkin(true, 2, H, 25, false, 23.5f, 2000), st);   // arm @2000 (desired 1)
-    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 62000), st); // desired 3 now
+    (void)ac_decide(mkin(true, 2, H, 25, false, 23.5f, 2000), st);   // arm @2000 (desired 2)
+    DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 24.0f, 62000), st); // desired 3 now
     CHECK_EQI(o.fan_idx, 3);
   }
   // The idle band eases down like any other lower-demand move, same 60s dwell.
   {
     DecisionState st; st.last_fan_idx = 5;
-    DecisionOutput o = ac_decide(mkin(true, 0, 18, 30, false, 26.0f, 1000), st); // idle, 2.0 deep
+    DecisionOutput o = ac_decide(mkin(true, 0, 18, 30, false, 26.0f, 1000), st); // idle, 3.5 deep
     CHECK_EQI(o.fan_idx, 5); CHECK_EQI(st.lower_since, 1000);
     o = ac_decide(mkin(true, 0, 18, 30, false, 26.0f, 61000), st);
     CHECK_EQI(o.fan_idx, FAN_IDX_MIN); CHECK_EQI(st.lower_since, 0);
@@ -333,7 +361,7 @@ static void group_d_ramp_timing() {
     CHECK_EQI(st.lower_since, 0xFFFFFF00u);
     DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 59744), st);
     // 59744 - 0xFFFFFF00 (mod 2^32) == 60000 -> steps down.
-    CHECK_EQI(o.fan_idx, 3);
+    CHECK_EQI(o.fan_idx, 4);
   }
   // Preserved quirk: arming exactly at now_ms==0 leaves the sentinel unset,
   // so the countdown silently restarts on the next tick. Same as a805f40.
@@ -345,10 +373,10 @@ static void group_d_ramp_timing() {
     (void)ac_decide(mkin(true, 2, H, 25, false, 24.5f, 59999), st); // re-arms here
     CHECK_EQI(st.lower_since, 59999);
     DecisionOutput o = ac_decide(mkin(true, 2, H, 25, false, 24.5f, 119999), st);
-    CHECK_EQI(o.fan_idx, 3); // drops only 60s after the RE-arm
+    CHECK_EQI(o.fan_idx, 4); // drops only 60s after the RE-arm
   }
   // Easing all the way down to the QUIET floor: high demand, then hold the room
-  // deep past the setpoint (delta -2.0 -> desired QUIET(1)) past the step-down
+  // deep past the target (depth -1.5 -> desired QUIET(1)) past the step-down
   // window. Exercises the floor through the real path, not just the bare curve.
   {
     DecisionState st;
@@ -373,10 +401,10 @@ static void group_e_oracle_sweep() {
   const uint32_t times[][2] = {{0, 1000}, {5000, 64999}, {5000, 65000}, {5000, 70000}};
   long cases = 0, mismatches = 0;
 
-  // deh stays 0: dehumidify diverges from the oracle and group_g pins it. tm 0
-  // is swept, but only through the fan block; see the decide_reference note.
+  // The reference mirrors dehumidify semantics, so deh is swept too. tm 0 is
+  // swept only through the fan block; see the decide_reference note.
   for (int act = 0; act <= 1; act++)
-   for (int deh = 0; deh <= 0; deh++)
+   for (int deh = 0; deh <= 1; deh++)
     for (uint8_t tm = 0; tm <= 2; tm++)
      for (int ri = 0; ri < 5 + 81; ri++) {
        float room = ri < 5 ? rooms_fixed[ri] : 15.0f + 0.25f * (ri - 5);
@@ -435,24 +463,21 @@ static void group_f_determinism() {
   // Smart Auto measures demand against its target, which is also where the call
   // releases, so demand stays positive for as long as the call runs.
   CHECK_EQI(oa.mode, 2);
-  CHECK_EQF(oa.control_delta_c, 24.7f - 24.0f);
+  CHECK_EQF(oa.control_delta_c, 24.7f - 24.5f);
 
-  // Negative delta is still preserved rather than clamped: fixed COOL commands
-  // the setpoint the user chose, so the room can sit past it.
+  // Explicit COOL runs the same cycle: sa 2 with the room above the pull target
+  // is still a call, demand positive, fan climbs to max at once.
   DecisionState c; c.sa_mode = 2; c.last_fan_idx = 4; c.lower_since = 500;
   DecisionOutput oc = ac_decide(mkin(true, 2, 22, 25, false, 24.7f, 30000), c);
   CHECK_EQI(oc.mode, 2);
-  CHECK_EQF(oc.temp, 25.0f);
-  CHECK_EQF(oc.control_delta_c, 24.7f - 25.0f);
-  // Just past the setpoint (under one full step) the staircase still asks 75%,
-  // matching the held level, so the fan neither climbs nor arms a step-down.
-  CHECK_EQI(oc.fan_idx, 4);
+  CHECK_EQF(oc.temp, 24.5f);
+  CHECK_EQF(oc.control_delta_c, 24.7f - 24.5f);
+  CHECK_EQI(oc.fan_idx, 5);
 }
 
-// Group G - dehumidify as an idle-mode toggle. Deliberately diverges from the
-// a805f40 oracle, which let dehumidify pre-empt every other input. DRY now
-// replaces the Smart-Auto idle band with no floor, so it covers the whole band
-// and may cool the room into a HEAT call, and still runs standalone when off.
+// Group G - dehumidify as an idle-band toggle. DRY replaces the idle band in
+// every target mode with no floor, so it covers the whole band and may cool
+// the room into a HEAT call, and still runs standalone when the accessory is off.
 static DecisionOutput dec1(bool active, uint8_t mode, float heat, float cool,
                            bool dehum, float room, int8_t sa_in = 3) {
   DecisionState st;
@@ -472,7 +497,7 @@ static void group_g_dehumidify_toggle() {
   o = dec1(true, 0, 18, 24, true, 22.0f);
   CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
   o = dec1(true, 0, 18, 24, false, 22.0f);
-  CHECK_EQI(o.mode, 3); CHECK_EQI(o.fan_idx, 3);   // idle, 0.5 past cool target
+  CHECK_EQI(o.mode, 3); CHECK_EQI(o.fan_idx, 1);   // idle, 1.5 past cool target
 
   // DRY has no floor: it covers the idle band all the way to the heat end.
   for (float room = 18.0f; room <= 23.0f; room += 0.5f) {
@@ -482,15 +507,20 @@ static void group_g_dehumidify_toggle() {
     CHECK_EQI(o.mode, 3);
   }
 
-  // Active conditioning is never displaced by the toggle.
+  // A running call is never displaced by the toggle; explicit-mode idle bands
+  // run DRY exactly like Smart Auto's.
   o = dec1(true, 0, 18, 24, true, 25.0f, 2);
   CHECK_EQI(o.mode, 2);
   o = dec1(true, 0, 18, 24, true, 17.0f, 0);
   CHECK_EQI(o.mode, 0);
-  o = dec1(true, 1, 18, 24, true, 22.0f);
+  o = dec1(true, 1, 18, 24, true, 17.0f);   // explicit HEAT, in a call
   CHECK_EQI(o.mode, 0);
-  o = dec1(true, 2, 18, 24, true, 22.0f);
+  o = dec1(true, 2, 18, 24, true, 25.0f);   // explicit COOL, in a call
   CHECK_EQI(o.mode, 2);
+  o = dec1(true, 1, 18, 24, true, 22.0f);   // explicit HEAT, idling
+  CHECK_EQI(o.mode, 1);
+  o = dec1(true, 2, 18, 24, true, 22.0f);   // explicit COOL, idling
+  CHECK_EQI(o.mode, 1);
 
   // Room unknown has no deadband to gate on, so native AUTO stands.
   o = dec1(true, 0, 18, 24, true, 0.5f);
@@ -515,32 +545,24 @@ static void group_g_dehumidify_toggle() {
   CHECK_EQI(seen[3], 0);   // never FAN while armed
 }
 
-// Group H - where Smart Auto drives the room, by range width. Every expected
-// value is a literal; computing them here would restate the code, not pin it.
+// Group H - where calls drive the room, by range width. Every expected value
+// is a literal; computing them here would restate the code, not pin it.
 static void group_h_pull_table() {
   struct Row { float heat, cool, pull, heat_target, cool_target; };
-  // Widths up to 4.5 take the AUTO_PULL_MIN_C floor, 5.0 to 6.5 the fraction
-  // snapped to the grid, 7.0 and above the AUTO_PULL_MAX_C cap.
+  // Static pull everywhere the half-range cap does not bind (width > 1.0).
   static const Row rows[] = {
-    {20.0f, 23.0f, 1.0f, 21.0f, 22.0f},
-    {20.0f, 24.0f, 1.0f, 21.0f, 23.0f},
-    {19.0f, 24.0f, 1.5f, 20.5f, 22.5f},
-    {18.0f, 24.0f, 1.5f, 19.5f, 22.5f},
-    {18.0f, 25.0f, 2.0f, 20.0f, 23.0f},
-    {16.0f, 24.0f, 2.0f, 18.0f, 22.0f},
-    {18.0f, 30.0f, 2.0f, 20.0f, 28.0f},
-    {16.0f, 31.0f, 2.0f, 18.0f, 29.0f},
-    // Odd-half widths, where the grid snap rounds rather than landing exactly.
-    // Without these, roundf could be ceilf or floorf and nothing would notice.
-    {19.5f, 24.0f, 1.0f, 20.5f, 23.0f},   // 4.5 -> 1.125 rounds down
-    {18.5f, 24.0f, 1.5f, 20.0f, 22.5f},   // 5.5 -> 1.375 rounds up
-    {17.5f, 24.0f, 1.5f, 19.0f, 22.5f},   // 6.5 -> 1.625 rounds down
-    {16.5f, 24.0f, 2.0f, 18.5f, 22.0f},   // 7.5 -> 1.875 rounds up
+    {20.0f, 23.0f, 0.5f, 20.5f, 22.5f},
+    {20.0f, 24.0f, 0.5f, 20.5f, 23.5f},
+    {19.0f, 24.0f, 0.5f, 19.5f, 23.5f},
+    {18.0f, 25.0f, 0.5f, 18.5f, 24.5f},
+    {16.0f, 24.0f, 0.5f, 16.5f, 23.5f},
+    {18.0f, 30.0f, 0.5f, 18.5f, 29.5f},
+    {16.0f, 31.0f, 0.5f, 16.5f, 30.5f},
+    {19.5f, 24.0f, 0.5f, 20.0f, 23.5f},   // off-grid width, pull unaffected
     // Below the setters' minimum gap. Unreachable from HomeKit, kept because the
     // core must stay stable if a stored state or a future caller supplies one.
-    // 2.0 is the width where both targets collapse onto the midpoint, which is
-    // why THRESHOLD_MIN_GAP_C sits above it.
-    {20.0f, 22.0f, 1.0f, 21.0f, 21.0f},
+    // 1.0 is the width where both targets collapse onto the midpoint.
+    {20.0f, 22.0f, 0.5f, 20.5f, 21.5f},
     {20.0f, 21.0f, 0.5f, 20.5f, 20.5f},
     {20.0f, 20.5f, 0.0f, 20.0f, 20.5f},
     {25.0f, 25.0f, 0.0f, 25.0f, 25.0f},
@@ -552,7 +574,7 @@ static void group_h_pull_table() {
   }
 
   // No permitted range parks on its own midpoint: that needs pull == range/2,
-  // impossible at or above the gap, where pull floors at 1.0 and half is 1.5.
+  // impossible at or above the gap, where pull is 0.5 and half is at least 1.5.
   for (float heat = 16.0f; heat <= 31.0f - THRESHOLD_MIN_GAP_C; heat += 0.5f)
     for (float cool = heat + THRESHOLD_MIN_GAP_C; cool <= 31.0f; cool += 0.5f) {
       const float mid = 0.5f * (heat + cool);
@@ -560,11 +582,11 @@ static void group_h_pull_table() {
       CHECK(auto_heat_target(heat, cool) < mid);
     }
 
-  // Targets are commandable only because they stay between the thresholds; the
-  // band itself is normalize_thresholds()'s job, not this function's.
+  // Targets are commandable by construction: clamped into TEMP_CMD_MIN/MAX,
+  // because an uncommandable target is a release point the room never reaches.
   const float grid_lo = 16.0f, grid_hi = 31.0f;   // characteristic min/max
-  CHECK_EQF(auto_cool_target(2.0f, 50.0f), 48.0f);
-  CHECK_EQF(auto_heat_target(0.0f, 2.0f), 1.0f);
+  CHECK_EQF(auto_cool_target(2.0f, 50.0f), 31.0f);
+  CHECK_EQF(auto_heat_target(0.0f, 2.0f), 16.0f);
   for (float heat = grid_lo; heat <= grid_hi; heat += 0.5f)
     for (float cool = heat; cool <= grid_hi; cool += 0.5f) {
       const float ct = auto_cool_target(heat, cool);
@@ -670,7 +692,7 @@ static void group_k_normalize() {
         float ih = nh, ic = nc;
         CHECK(!normalize_thresholds(ih, ic, LO, HI, w));  // idempotent
         // And the repaired pair gives the core a usable idle band.
-        CHECK(auto_pull_c(nh, nc) >= AUTO_PULL_MIN_C);
+        CHECK(auto_pull_c(nh, nc) >= AUTO_PULL_C);
       }
 }
 
@@ -678,18 +700,20 @@ static void group_k_normalize() {
 // target - including at and below the user's threshold - then the idle band
 // winds down with depth and back up approaching the opposite threshold.
 static void group_i_auto_fan_levels() {
-  // heat 18 / cool 24 -> targets 19.5 / 22.5. Fresh state per row so the 60s
+  // heat 18 / cool 24 -> targets 18.5 / 23.5. Fresh state per row so the 60s
   // step-down dwell does not mask which level the staircase asks for.
   struct { float room; uint8_t mode, fan; } expect[] = {
-    {25.5f, 2, 5}, {24.0f, 2, 5},
-    {23.0f, 2, 5},             // last half-degree of the call: still max
-    {22.5f, 3, 4},             // released at the target: hands over at 75%
-    {22.0f, 3, 3},             // idle, 0.5 deep
-    {21.5f, 3, 2},             // idle, 1.0 deep
-    {21.0f, 3, 1},             // 1.5 deep on both sides: QUIET
-    {20.0f, 3, 3},             // winding up toward the heat target
-    {19.5f, 3, 4},             // at the heat target
-    {19.0f, 3, 5},             // past it; the heat call triggers below 18
+    {25.5f, 2, 5},
+    {24.0f, 2, 5},             // last half-degree of the call: still max
+    {23.5f, 3, 4},             // released at the target: hands over at 75%
+    {23.0f, 3, 3},             // idle, 0.5 deep
+    {22.5f, 3, 2},             // idle, 1.0 deep
+    {22.0f, 3, 1},             // idle, 1.5 deep: QUIET
+    {21.0f, 3, 1},             // mid-band: QUIET
+    {19.5f, 3, 2},             // winding up toward the heat target
+    {19.0f, 3, 3},
+    {18.5f, 3, 4},             // at the heat target
+    {18.0f, 3, 5},             // past it; the heat call triggers below 18
   };
   for (auto &e : expect) {
     DecisionState st; st.sa_mode = 2;
@@ -700,13 +724,13 @@ static void group_i_auto_fan_levels() {
 
   // Same on the heating side, mirrored.
   struct { float room; uint8_t mode, fan; } heat_expect[] = {
-    {16.5f, 0, 5}, {19.0f, 0, 5},
-    {19.5f, 3, 4},             // released at the heat target
-    {20.0f, 3, 3},
+    {16.5f, 0, 5}, {18.0f, 0, 5},
+    {18.5f, 3, 4},             // released at the heat target
+    {19.0f, 3, 3},
     {21.0f, 3, 1},
-    {22.0f, 3, 3},             // winding up toward the cool target
-    {22.5f, 3, 4},
-    {23.0f, 3, 5},             // past it; the cool call triggers above 24
+    {23.0f, 3, 3},             // winding up toward the cool target
+    {23.5f, 3, 4},
+    {24.0f, 3, 5},             // past it; the cool call triggers above 24
   };
   for (auto &e : heat_expect) {
     DecisionState st; st.sa_mode = 0;
@@ -790,11 +814,13 @@ static void group_l_fan_dither() {
   {
     DecisionState st; uint32_t t = 10000;
     uint8_t seq[8]; int n = 0;
-    for (float r = C; r <= C + 3.5f && n < 8; r += 0.5f)
+    for (float r = C - 1.5f; r <= C + 2.0f && n < 8; r += 0.5f)
       seq[n++] = ac_decide(mkin(true, 2, H, C, false, r, t += 10000), st).fan_idx;
-    CHECK_EQI(seq[0], 4);     // at setpoint: 75%
-    CHECK_EQI(seq[1], 5);     // any amount short of target: max, immediately
-    CHECK_EQI(seq[7], 5);     // and stays there
+    CHECK_EQI(seq[0], 2);     // idle, 1.0 past the pull target
+    CHECK_EQI(seq[1], 3);
+    CHECK_EQI(seq[2], 4);     // at the pull target
+    CHECK_EQI(seq[3], 5);     // any amount short of it: max, immediately
+    CHECK_EQI(seq[7], 5);     // and stays there through the call trigger
   }
 
   // A fresh state has no level to hold, so a large excursion is still instant.
@@ -809,9 +835,9 @@ static void group_l_fan_dither() {
     (void)ac_decide(mkin(true, 2, H, C, false, C + 3.0f, 1000), st);
     uint8_t hi = st.last_fan_idx;
     CHECK_EQI(hi, 5);
-    DecisionOutput o = ac_decide(mkin(true, 2, H, C, false, C, 2000), st);
+    DecisionOutput o = ac_decide(mkin(true, 2, H, C, false, C - 0.5f, 2000), st);
     CHECK_EQI(o.fan_idx, hi);                  // holds during the dwell
-    o = ac_decide(mkin(true, 2, H, C, false, C, 62000), st);
+    o = ac_decide(mkin(true, 2, H, C, false, C - 0.5f, 62000), st);
     CHECK_EQI(o.fan_idx, 4);                   // eases to the at-target level
   }
 }

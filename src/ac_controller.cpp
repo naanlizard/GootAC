@@ -536,10 +536,14 @@ void update_physical_ac() {
                                     : PSTR("Logic: Target OFF"), sizeof(rationale)-1);
   } else if (hk_target_mode == 1) { // HEAT
     dtostrf(hpTemp, 1, 1, tempBuf);
-    snprintf_P(rationale, sizeof(rationale), PSTR("Logic: HEAT mode (Target %sC)"), tempBuf);
+    snprintf_P(rationale, sizeof(rationale),
+               hpMode == 0 ? PSTR("Logic: HEAT call (Target %sC)")
+                           : PSTR("Logic: HEAT idle (Target %sC)"), tempBuf);
   } else if (hk_target_mode == 2) { // COOL
     dtostrf(hpTemp, 1, 1, tempBuf);
-    snprintf_P(rationale, sizeof(rationale), PSTR("Logic: COOL mode (Target %sC)"), tempBuf);
+    snprintf_P(rationale, sizeof(rationale),
+               hpMode == 2 ? PSTR("Logic: COOL call (Target %sC)")
+                           : PSTR("Logic: COOL idle (Target %sC)"), tempBuf);
   } else {
     dtostrf(roomTemp, 1, 1, tempBuf);
     snprintf_P(rationale, sizeof(rationale),
@@ -686,23 +690,18 @@ void ac_controller_sync_from_ac() {
     }
 
     // Sync Mode -> Target State
-    // Hardware: HEAT=0, DRY=1, COOL=2, FAN=3, AUTO=4
-    // HomeKit: AUTO=0, HEAT=1, COOL=2
-    uint8_t hkTargetMode = 0; // Default to AUTO
+    // Hardware: HEAT=0, DRY=1, COOL=2, FAN=3, AUTO=4; HomeKit: AUTO=0, HEAT=1, COOL=2.
+    // Only remote-chosen HEAT/COOL/AUTO is user intent: FAN/DRY match the
+    // firmware's own idle band, and Smart Auto never syncs mode back.
+    int8_t hkTargetMode = -1;
     if (strcmp(s.mode, "HEAT") == 0) hkTargetMode = 1;
     else if (strcmp(s.mode, "COOL") == 0) hkTargetMode = 2;
-    else if (strcmp(s.mode, "DRY") == 0) {
-        // Option: Sync DRY to COOL if preferred, or leave as AUTO
-        hkTargetMode = 2; 
-    }
+    else if (strcmp(s.mode, "AUTO") == 0) hkTargetMode = 0;
 
-    // In Smart-Auto (target_mode 0) the firmware itself drives the physical
-    // HEAT/COOL/FAN mode, so the unit's reported mode is not user intent --
-    // syncing it back would silently drop Smart-Auto to a fixed mode. Only
-    // reflect an external mode change when the user picked a fixed mode.
-    if (currentState.target_mode != 0 && currentState.target_mode != hkTargetMode) {
-      currentState.target_mode = hkTargetMode;
-      cha_ac_target_state.value.uint8_value = hkTargetMode;
+    if (currentState.target_mode != 0 && hkTargetMode >= 0 &&
+        currentState.target_mode != hkTargetMode) {
+      currentState.target_mode = (uint8_t)hkTargetMode;
+      cha_ac_target_state.value.uint8_value = (uint8_t)hkTargetMode;
       homekit_characteristic_notify(&cha_ac_target_state,
                                     cha_ac_target_state.value);
     }
@@ -871,12 +870,12 @@ void ac_controller_write_metrics(Print& out) {
     m_b(out, F("gootac_swing_mode"),    F("1 if vane swing is enabled, else 0."),                      currentState.swing_mode != 0);
     m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
     m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 1=QUIET, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_fan_target_idx);
-    m_f(out, F("gootac_control_delta_celsius"), F("Fan-driving delta: >0 short of the commanded target, <=0 depth past it (idle band: vs the nearer target); 0 when the fan is delegated."), g_control_delta_c);
+    m_f(out, F("gootac_control_delta_celsius"), F("Fan-driving delta: >0 short of the commanded target, <=0 depth past it (idle band: vs its anchor target); 0 when the fan is delegated."), g_control_delta_c);
     m_b(out, F("gootac_dehumidifier_active"), F("1 if the HomeKit dehumidifier service is targeted on, else 0."), currentState.dehumidifier != 0);
     m_b(out, F("gootac_decided_power"), F("Last decision: 1 if the unit should be powered on."), g_last_decision.power);
     m_i(out, F("gootac_decided_mode_index"), F("Last decision: MODE_MAP index (0 HEAT,1 DRY,2 COOL,3 FAN,4 AUTO); meaningful only when decided power=1."), g_last_decision.mode);
     m_f(out, F("gootac_decided_temp_celsius"), F("Last decision: setpoint in Celsius; not commanded when mode index=3."), g_last_decision.temp);
-    m_i(out, F("gootac_sa_mode"), F("Smart-Auto direction memory: -1 uninit, 0 HEAT, 2 COOL, 3 FAN deadband."), g_decision_state.sa_mode);
+    m_i(out, F("gootac_sa_mode"), F("Call state, all modes: -1 uninit, 0 HEAT call, 2 COOL call, 3 idle band."), g_decision_state.sa_mode);
     m_i(out, F("gootac_comp_applied_sig"), F("Compressor gate: last applied/observed signature (0 idle, 1 cool-dir, 2 heat, 3 auto, 255 unseeded)."), g_comp_gate.sig);
     m_i(out, F("gootac_comp_decided_sig"), F("Compressor gate: signature of the current decision."), comp_sig(g_last_decision.power, g_last_decision.mode));
     m_b(out, F("gootac_comp_deferred"), F("1 while the gate is holding a decided signature change back."), g_comp_deferred);

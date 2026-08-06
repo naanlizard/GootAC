@@ -10,11 +10,13 @@ constexpr uint8_t  FAN_IDX_MAX      = 5;
 constexpr uint32_t FAN_STEP_DOWN_MS = 60000;  // sustained lower demand before easing down
 constexpr float    SENSOR_STEP_C    = 0.5f;   // CN105 reports room temp in 0.5C steps
 
-// How far past the calling threshold Smart Auto drives, as a fraction of the
-// range, clamped so a narrow range still moves and a wide one does not overshoot.
-constexpr float    AUTO_PULL_FRAC   = 0.25f;
-constexpr float    AUTO_PULL_MIN_C  = 1.0f;
-constexpr float    AUTO_PULL_MAX_C  = 2.0f;
+// How far past the calling threshold a call drives: static, one sensor step.
+// Total hysteresis is 2 steps; the comp gate paces anything faster.
+constexpr float    AUTO_PULL_C      = 0.5f;
+// TEMP_MAP endpoints: targets outside this band cannot be commanded, and an
+// uncommandable target is a release point the room never reaches.
+constexpr float    TEMP_CMD_MIN_C   = 16.0f;
+constexpr float    TEMP_CMD_MAX_C   = 31.0f;
 
 // The target is both the commanded setpoint and the release point: the call ends
 // exactly when the room reaches it, and the idle staircase picks up at the same
@@ -50,7 +52,7 @@ struct DecisionInput {
 
 // Cross-tick memory. Reset only at boot.
 struct DecisionState {
-  int8_t   sa_mode      = -1; // -1 uninit; 0=HEAT, 2=COOL, 3=idle band
+  int8_t   sa_mode      = -1; // call state, all modes: -1 uninit; 0=HEAT call, 2=COOL call, 3=idle band
   uint8_t  last_fan_idx = 0;  // FAN_MAP index of the last commanded fan level
   uint32_t lower_since  = 0;  // 0 = no step-down pending
 };
