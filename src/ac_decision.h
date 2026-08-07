@@ -12,7 +12,7 @@ constexpr float    SENSOR_STEP_C    = 0.5f;   // CN105 reports room temp in 0.5C
 
 // How far past the calling threshold a call drives: static, one sensor step.
 // Total hysteresis is 2 steps; the comp gate paces anything faster.
-constexpr float    AUTO_PULL_C      = 0.5f;
+constexpr float    CALL_PULL_C      = 0.5f;
 // TEMP_MAP endpoints: targets outside this band cannot be commanded, and an
 // uncommandable target is a release point the room never reaches.
 constexpr float    TEMP_CMD_MIN_C   = 16.0f;
@@ -21,9 +21,9 @@ constexpr float    TEMP_CMD_MAX_C   = 31.0f;
 // The target is both the commanded setpoint and the release point: the call ends
 // exactly when the room reaches it, and the idle staircase picks up at the same
 // depth, so the fan hands over continuously across the release.
-float auto_pull_c(float heat_threshold, float cool_threshold);
-float auto_cool_target(float heat_threshold, float cool_threshold);  // cool - pull
-float auto_heat_target(float heat_threshold, float cool_threshold);  // heat + pull
+float pull_c(float heat_threshold, float cool_threshold);
+float cool_call_target(float heat_threshold, float cool_threshold);  // cool - pull
+float heat_call_target(float heat_threshold, float cool_threshold);  // heat + pull
 
 // ac_decide has no defence of its own: an inverted pair trips both entry tests
 // and flips HEAT/COOL every tick, so every caller must normalize first.
@@ -34,6 +34,13 @@ enum ThresholdAuthority : uint8_t {
   THRESHOLD_FROM_COOL_WRITE = 1,
   THRESHOLD_UNTRUSTED       = 2,  // restored/migrated state; neither value trusted
 };
+
+// MODE_MAP indices (HeatPump.h vocabulary) and HomeKit TargetHeaterCoolerState.
+enum : uint8_t {
+  MODE_IDX_HEAT = 0, MODE_IDX_DRY = 1, MODE_IDX_COOL = 2,
+  MODE_IDX_FAN = 3, MODE_IDX_AUTO = 4,
+};
+enum : uint8_t { HK_TARGET_AUTO = 0, HK_TARGET_HEAT = 1, HK_TARGET_COOL = 2 };
 
 // Assumes hi - lo >= THRESHOLD_MIN_GAP_C. Only UNTRUSTED reorders an inversion:
 // on a write path a swap moves the client's value onto the other characteristic.
@@ -50,9 +57,13 @@ struct DecisionInput {
   uint32_t now_ms;          // caller passes millis(); uint32_t matches ESP8266 wrap
 };
 
+// Call-cycle state, every target mode. Values frozen: gootac_sa_mode /
+// gootac_call_state emit them raw.
+enum : int8_t { CALL_UNINIT = -1, CALL_HEAT = 0, CALL_COOL = 2, CALL_IDLE = 3 };
+
 // Cross-tick memory. Reset only at boot.
 struct DecisionState {
-  int8_t   sa_mode      = -1; // call state, all modes: -1 uninit; 0=HEAT call, 2=COOL call, 3=idle band
+  int8_t   call_state   = CALL_UNINIT;
   uint8_t  last_fan_idx = 0;  // FAN_MAP index of the last commanded fan level
   uint32_t lower_since  = 0;  // 0 = no step-down pending
 };

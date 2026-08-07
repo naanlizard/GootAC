@@ -11,6 +11,10 @@ extern "C" {
 // Main configuration object used by the HomeKit daemon
 extern homekit_server_config_t config;
 
+// Runtime identity derived from DEVICE_NAME; defined in main.cpp.
+extern char hostName[32];
+extern char accessoryName[32];
+
 // Accessory Name Characteristics (set at runtime from DEVICE_NAME)
 extern homekit_characteristic_t cha_name;
 extern homekit_characteristic_t cha_conf_name;

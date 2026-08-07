@@ -90,17 +90,9 @@ struct heatpumpStatus {
   bool operating; // if true, the heatpump is operating to reach the desired
                   // temperature
   heatpumpTimers timers;
-  // Raw byte 3 of the 0x06 status packet. Semantic unverified.
-  // SwiCago's library calls this "compressorFrequency"; we have renamed
-  // it to avoid asserting an interpretation. What we know from observation:
-  // the value moves in lockstep across all 4 indoor units on the same
-  // outdoor unit (97% of 30s-aligned windows show all 4 within ±3, 67%
-  // exact match), ruling out a per-indoor-unit signal like an individual
-  // coil thermistor. It is therefore some system-wide outdoor telemetry
-  // — compressor frequency (Hz), outdoor coil temperature, or other
-  // discharge/condenser signal. Observed fleet range: 0–67.
-  // Do NOT treat as °C — earlier "byte + 10" temperature interpretation
-  // was wrong and has been retracted from logs and /status.
+  // Raw byte 3 of the 0x06 status packet (SwiCago: "compressorFrequency").
+  // Moves in lockstep across all indoor units on one outdoor unit, so it is
+  // system-wide outdoor telemetry; semantics unverified, NOT degrees C.
   int statusByte3;
   // Status flags decoded from info-type 0x09 byte 3 (muart-group spec).
   // bit 0 filter, bit 1 defrost, bit 2 preheat, bit 3 standby/blocked.
@@ -127,25 +119,13 @@ private:
   static const int PACKET_INFO_INTERVAL_MS = 2000;
   static const int PACKET_TYPE_DEFAULT = 99;
 
+  // Protocol byte tables (CONNECT, HEADER, POWER, MODE, ...) are file-scope
+  // PROGMEM arrays in HeatPump.cpp; upstream keeps them as per-instance RAM
+  // members (~450B on a 40KB-heap part).
   static const int CONNECT_LEN = 8;
-  const byte CONNECT[CONNECT_LEN] = {0xfc, 0x5a, 0x01, 0x30,
-                                     0x02, 0xca, 0x01, 0xa8};
   static const int HEADER_LEN = 8;
-  const byte HEADER[HEADER_LEN] = {0xfc, 0x41, 0x01, 0x30,
-                                   0x10, 0x01, 0x00, 0x00};
-
   static const int INFOHEADER_LEN = 5;
-  const byte INFOHEADER[INFOHEADER_LEN] = {0xfc, 0x42, 0x01, 0x30, 0x10};
-
   static const int INFOMODE_LEN = 5;
-  const byte INFOMODE[INFOMODE_LEN] = {
-      0x02, // request a settings packet - RQST_PKT_SETTINGS
-      0x03, // request the current room temp - RQST_PKT_ROOM_TEMP
-      0x05, // request the timers - RQST_PKT_TIMERS
-      0x06, // request status - RQST_PKT_STATUS
-      0x09, // request run state - RQST_PKT_RUN_STATE (status flags, actual
-            // fan speed, auto sub-mode)
-  };
 
   const int RCVD_PKT_FAIL = 0;
   const int RCVD_PKT_CONNECT_SUCCESS = 1;
@@ -154,22 +134,6 @@ private:
   const int RCVD_PKT_UPDATE_SUCCESS = 4;
   const int RCVD_PKT_STATUS = 5;
   const int RCVD_PKT_TIMER = 6;
-
-  const byte CONTROL_PACKET_1[5] = {0x01, 0x02, 0x04, 0x08, 0x10};
-  const byte CONTROL_PACKET_2[1] = {0x01};
-
-  const byte POWER[2] = {0x00, 0x01};
-  const byte MODE[5] = {0x01, 0x02, 0x03, 0x07, 0x08};
-  const byte TEMP[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-                         0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
-  const byte FAN[6] = {0x00, 0x01, 0x02, 0x03, 0x05, 0x06};
-  const byte VANE[7] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x07};
-  const byte WIDEVANE[7] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x08, 0x0c};
-  const byte ROOM_TEMP[32] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
-                              0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-                              0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-                              0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
-  const byte TIMER_MODE[4] = {0x00, 0x01, 0x02, 0x03};
 
   static const int TIMER_INCREMENT_MINUTES = 10;
 
@@ -183,6 +147,21 @@ private:
   int infoMode;
   unsigned long lastRecv;
   bool connected = false;
+
+  // Async SET and connect-handshake state, driven from loop(). Replaces the
+  // upstream busy-waits that stalled the main loop 1-8s per command/reconnect.
+  static const int UPDATE_ACK_TIMEOUT_MS = 2000;
+  static const int CONNECT_SETTLE_MS = 2000;
+  static const int CONNECT_ACK_TIMEOUT_MS = 2000;
+  static const int CONNECT_BACKOFF_MS = 10000;
+  enum ConnState : uint8_t { CONN_IDLE = 0, CONN_SETTLE, CONN_WAIT_ACK, CONN_BACKOFF };
+  bool updatePending = false;
+  bool awaitingAck = false;
+  uint8_t updateRetries = 0;
+  unsigned long ackDeadline = 0;
+  ConnState connState = CONN_IDLE;
+  unsigned long connSince = 0;
+  bool connTriedBothRates = false;
   bool autoUpdate;
   bool firstRun;
   bool tempMode;
@@ -201,6 +180,7 @@ private:
 
   bool canSend(bool isInfo);
   bool canRead();
+  int pollRead();
   byte checkSum(byte bytes[], int len);
   void createPacket(byte *packet, heatpumpSettings settings);
   void createInfoPacket(byte *packet, byte packetType);
@@ -271,6 +251,9 @@ public:
   bool getOperating();
   bool isConnected();
   bool wasExternalUpdate() { return _externalUpdateOccurred; }
+  // True while a queued SET has not yet been written and acknowledged; an
+  // info request sent in that window would read back pre-SET state.
+  bool updateInFlight();
 
   float FahrenheitToCelsius(int tempF);
   int CelsiusToFahrenheit(float tempC);

@@ -1,5 +1,19 @@
 #pragma once
 #include <Arduino.h>
+#include "config.h"
+
+// Plausibility bounds on the room-temperature sensor reading: outside them a
+// value is a glitch or parse error, rejected by the sync path and declared as
+// the HomeKit characteristic min/max. Defaults suit Lisbon; override in config.h.
+#ifndef MIN_VALID_ROOM_TEMP_C
+#define MIN_VALID_ROOM_TEMP_C 10.0f
+#endif
+#ifndef MAX_VALID_ROOM_TEMP_C
+#define MAX_VALID_ROOM_TEMP_C 45.0f
+#endif
+
+// Target RH seed shared by the characteristic, fresh defaults, and migrations.
+#define HUMIDITY_THRESHOLD_DEFAULT 55.0f
 
 struct TargetState {
     uint8_t active;              // 0: Off, 1: On
@@ -12,12 +26,9 @@ struct TargetState {
     uint32_t checksum;           // Integrity check
 };
 
-// --- Logging Macros ---
-#define GLOG_INFO(id, fmt, ...)  Log.infoln(F("[%s] " fmt), id, ##__VA_ARGS__)
-#define GLOG_TRACE(id, fmt, ...) Log.traceln(F("[%s] " fmt " (Heap: %u)"), id, ##__VA_ARGS__, ESP.getFreeHeap())
-#define GLOG_WARN(id, fmt, ...)  Log.warningln(F("[%s] " fmt), id, ##__VA_ARGS__)
-#define GLOG_ERROR(id, fmt, ...) Log.errorln(F("[%s] " fmt " (Heap: %u)"), id, ##__VA_ARGS__, ESP.getFreeHeap())
-#define GLOG_BOOT(fmt, ...)      Log.noticeln(F("[BOOT] " fmt), ##__VA_ARGS__)
+// --- Logging ---
+// GLOG_* macros and the two-tier logger live in glog.h.
+#include "glog.h"
 
 // Specialized HomeKit logging with client context (implemented in ac_controller.cpp)
 void hk_log_info(const char* fmt, ...);

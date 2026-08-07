@@ -18,43 +18,43 @@
 */
 #include "HeatPump.h"
 #include "ac_controller.h"
-#include <ArduinoLog.h>
+
+// Protocol byte tables in flash; every read goes through pgm_read_byte /
+// memcpy_P. Upstream declares these as per-instance RAM members.
+static const byte CONNECT[] PROGMEM = {0xfc, 0x5a, 0x01, 0x30,
+                                       0x02, 0xca, 0x01, 0xa8};
+static const byte HEADER[] PROGMEM = {0xfc, 0x41, 0x01, 0x30,
+                                      0x10, 0x01, 0x00, 0x00};
+static const byte INFOHEADER[] PROGMEM = {0xfc, 0x42, 0x01, 0x30, 0x10};
+static const byte INFOMODE[] PROGMEM = {
+    0x02, // request a settings packet - RQST_PKT_SETTINGS
+    0x03, // request the current room temp - RQST_PKT_ROOM_TEMP
+    0x05, // request the timers - RQST_PKT_TIMERS
+    0x06, // request status - RQST_PKT_STATUS
+    0x09, // request run state - RQST_PKT_RUN_STATE (status flags, actual
+          // fan speed, auto sub-mode)
+};
+static const byte CONTROL_PACKET_1[] PROGMEM = {0x01, 0x02, 0x04, 0x08, 0x10};
+static const byte CONTROL_PACKET_2[] PROGMEM = {0x01};
+static const byte POWER[] PROGMEM = {0x00, 0x01};
+static const byte MODE[] PROGMEM = {0x01, 0x02, 0x03, 0x07, 0x08};
+static const byte TEMP[] PROGMEM = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+                                    0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                                    0x0c, 0x0d, 0x0e, 0x0f};
+static const byte FAN[] PROGMEM = {0x00, 0x01, 0x02, 0x03, 0x05, 0x06};
+static const byte VANE[] PROGMEM = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x07};
+static const byte WIDEVANE[] PROGMEM = {0x01, 0x02, 0x03, 0x04,
+                                        0x05, 0x08, 0x0c};
+static const byte ROOM_TEMP[] PROGMEM = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,
+    0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+    0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f};
+static const byte TIMER_MODE[] PROGMEM = {0x00, 0x01, 0x02, 0x03};
 
 // Structures //////////////////////////////////////////////////////////////////
 
-bool operator==(const heatpumpSettings &lhs, const heatpumpSettings &rhs) {
-  return lhs.power == rhs.power && lhs.mode == rhs.mode &&
-         lhs.temperature == rhs.temperature && lhs.fan == rhs.fan &&
-         lhs.vane == rhs.vane && lhs.wideVane == rhs.wideVane &&
-         lhs.iSee == rhs.iSee;
-}
-
-bool operator!=(const heatpumpSettings &lhs, const heatpumpSettings &rhs) {
-  return lhs.power != rhs.power || lhs.mode != rhs.mode ||
-         lhs.temperature != rhs.temperature || lhs.fan != rhs.fan ||
-         lhs.vane != rhs.vane || lhs.wideVane != rhs.wideVane ||
-         lhs.iSee != rhs.iSee;
-}
-
-bool operator!(const heatpumpSettings &settings) {
-  return !settings.power && !settings.mode && !settings.temperature &&
-         !settings.fan && !settings.vane && !settings.wideVane &&
-         !settings.iSee;
-}
-
-bool operator==(const heatpumpTimers &lhs, const heatpumpTimers &rhs) {
-  return lhs.mode == rhs.mode && lhs.onMinutesSet == rhs.onMinutesSet &&
-         lhs.onMinutesRemaining == rhs.onMinutesRemaining &&
-         lhs.offMinutesSet == rhs.offMinutesSet &&
-         lhs.offMinutesRemaining == rhs.offMinutesRemaining;
-}
-
-bool operator!=(const heatpumpTimers &lhs, const heatpumpTimers &rhs) {
-  return lhs.mode != rhs.mode || lhs.onMinutesSet != rhs.onMinutesSet ||
-         lhs.onMinutesRemaining != rhs.onMinutesRemaining ||
-         lhs.offMinutesSet != rhs.offMinutesSet ||
-         lhs.offMinutesRemaining != rhs.offMinutesRemaining;
-}
+// Free operators for the value structs live in HeatPumpCommon.cpp (shared
+// with the fake driver).
 
 // Constructor /////////////////////////////////////////////////////////////////
 
@@ -90,6 +90,9 @@ HeatPump::HeatPump() {
 
 bool HeatPump::connect(HardwareSerial *serial) { return connect(serial, true); }
 
+// Arms the non-blocking handshake; loop() drives it (settle, CONNECT, ACK,
+// bitrate shift, backoff). Returns true = started, not connected: poll
+// isConnected(). Upstream blocked here up to ~8s.
 bool HeatPump::connect(HardwareSerial *serial, bool retry) {
   if (serial != NULL) {
     _HardSerial = serial;
@@ -103,107 +106,33 @@ bool HeatPump::connect(HardwareSerial *serial, bool retry) {
   if (onConnectCallback) {
     onConnectCallback();
   }
-
-  // settle before we start sending packets
-  delay(2000);
-
-  byte packet[CONNECT_LEN];
-  memcpy(packet, CONNECT, CONNECT_LEN);
-  GLOG_TRACE("MITSUBISHI", "Sending CONNECT packet...");
-  writePacket(packet, CONNECT_LEN);
-
-  uint32_t start = millis();
-  while (!canRead() && (millis() - start < 2000)) {
-    ESP.wdtFeed();
-    yield();
-    delay(10);
-  }
-
-  int packetType = readPacket();
-  if (packetType != RCVD_PKT_CONNECT_SUCCESS) {
-    if (retry) {
-      GLOG_INFO("MITSUBISHI", "Connect failed at %d baud, shifting bitrate...",
-                bitrate);
-      bitrate = (bitrate == 2400 ? 9600 : 2400);
-      return connect(serial, false);
-    } else {
-      GLOG_ERROR("MITSUBISHI",
-                 "Physical AC Handshake Failed! Check RX/TX wiring.");
-    }
-  } else {
-    connected = true;
-    GLOG_TRACE("MITSUBISHI",
-               "Connection Successful! Physical unit acknowledged.");
-  }
-  return packetType == RCVD_PKT_CONNECT_SUCCESS;
+  connState = CONN_SETTLE;
+  connSince = millis();
+  connTriedBothRates = !retry;
+  return true;
 }
 
+// Queues a SET for loop(): written when the line frees up (canSend), ACK
+// consumed asynchronously, one resend on timeout. The packet is built from
+// wantedSettings at send time. Upstream busy-waited 1-3s here.
 bool HeatPump::update() {
   _externalUpdateOccurred = false;
-
-  byte packet[PACKET_LEN] = {};
-  createPacket(packet, wantedSettings);
-  // No control bits set = nothing to command. The unit still reacts to such
-  // packets (observed: resets its native AUTO-fan state machine), so skip.
-  // NB: if enableAutoUpdate() is ever used, make sure wanted/current cannot
-  // diverge on fields createPacket ignores (iSee) or sync() will spin here.
-  if (packet[6] == 0 && packet[7] == 0) {
-    GLOG_TRACE("MITSUBISHI", "UPDATE skipped (no pending control bits)");
-    return true;
-  }
-
-  uint32_t sendStart = millis();
-  while (!canSend(false) && (millis() - sendStart < 2000)) {
-    ESP.wdtFeed();
-    yield();
-    delay(10);
-  }
-
-  GLOG_INFO("MITSUBISHI", "Sending UPDATE (Power=%s, Mode=%s, Temp=%sC)",
-            wantedSettings.power, wantedSettings.mode,
-            String(wantedSettings.temperature, 1).c_str());
-  writePacket(packet, PACKET_LEN);
-
-  uint32_t readStart = millis();
-  while (!canRead() && (millis() - readStart < 2000)) {
-    ESP.wdtFeed();
-    yield();
-    delay(10);
-  }
-  if (millis() - readStart >= 2000) {
-    GLOG_WARN("MITSUBISHI", "Update ACK Timeout (2000ms)");
-  }
-  int packetType = readPacket();
-
-  if (packetType == RCVD_PKT_UPDATE_SUCCESS) {
-    GLOG_INFO("MITSUBISHI", "Update SUCCESS!");
-    // call sync() to get the latest settings from the heatpump for autoUpdate,
-    // which should now have the updated settings
-    if (autoUpdate) { // this sync will happen regardless, but autoUpdate needs
-                      // it sooner than later.
-      uint32_t syncWait = millis();
-      while (!canSend(true) && (millis() - syncWait < 5000)) {
-        ESP.wdtFeed();
-        delay(10);
-      }
-      sync(RQST_PKT_SETTINGS);
-    }
-
-    return true;
-  } else {
-    return false;
-  }
+  updatePending = true;
+  updateRetries = 1;
+  return true;
 }
+
+bool HeatPump::updateInFlight() { return updatePending || awaitingAck; }
 
 void HeatPump::sync(byte packetType) {
   _externalUpdateOccurred = false;
   if ((!connected) || (millis() - lastRecv > (PACKET_SENT_INTERVAL_MS * 10))) {
     GLOG_TRACE("MITSUBISHI",
-               "Connection lost or idle (last recv: %ls ago). Reconnecting...",
+               "Connection lost or idle (last recv: %lus ago). Reconnecting...",
                (millis() - lastRecv) / 1000);
     connect(NULL);
   } else if (canRead()) {
-    readPacket();
+    pollRead();
   } else if (autoUpdate && !firstRun && wantedSettings != currentSettings &&
              packetType == PACKET_TYPE_DEFAULT) {
     GLOG_TRACE("MITSUBISHI", "Drafting auto-update due to setting mismatch");
@@ -211,19 +140,108 @@ void HeatPump::sync(byte packetType) {
   } else if (canSend(true)) {
     byte packet[PACKET_LEN] = {};
     createInfoPacket(packet, packetType);
-    char subTypeHex[3];
-    snprintf(subTypeHex, 3, "%02X", packet[5]);
-    GLOG_TRACE("MITSUBISHI", "Polling info (Idx: %d, SubType: 0x%s)",
-               packetType, subTypeHex);
+    GLOG_TRACE("MITSUBISHI", "Polling info (Idx: %d, SubType: 0x%02X)",
+               packetType, packet[5]);
     writePacket(packet, PACKET_LEN);
   }
 }
 
 void HeatPump::loop() {
-  if (!connected)
-    return;
-
   unsigned long now = millis();
+
+  // Connect handshake state machine. canRead() turns true 1s after a write
+  // and readPacket() clears it, so each state gets exactly one read attempt,
+  // mirroring the old blocking sequence.
+  if (!connected) {
+    switch (connState) {
+      case CONN_IDLE: // connect() never called
+        break;
+      case CONN_SETTLE:
+        if (now - connSince >= CONNECT_SETTLE_MS) {
+          byte packet[CONNECT_LEN];
+          memcpy_P(packet, CONNECT, CONNECT_LEN);
+          GLOG_TRACE("MITSUBISHI", "Sending CONNECT packet...");
+          writePacket(packet, CONNECT_LEN);
+          connState = CONN_WAIT_ACK;
+          connSince = now;
+        }
+        break;
+      case CONN_WAIT_ACK: {
+        int packetType = canRead() ? pollRead() : RCVD_PKT_FAIL;
+        if (packetType == RCVD_PKT_CONNECT_SUCCESS) {
+          connected = true;
+          connState = CONN_IDLE;
+          GLOG_TRACE("MITSUBISHI",
+                     "Connection Successful! Physical unit acknowledged.");
+        } else if (packetType != RCVD_PKT_FAIL ||
+                   now - connSince >= CONNECT_ACK_TIMEOUT_MS) {
+          if (!connTriedBothRates) {
+            GLOG_INFO("MITSUBISHI",
+                      "Connect failed at %d baud, shifting bitrate...", bitrate);
+            bitrate = (bitrate == 2400 ? 9600 : 2400);
+            connTriedBothRates = true;
+            _HardSerial->begin(bitrate, SERIAL_8E1);
+            connState = CONN_SETTLE;
+            connSince = now;
+          } else {
+            GLOG_ERROR("MITSUBISHI",
+                       "Physical AC Handshake Failed! Check RX/TX wiring.");
+            connState = CONN_BACKOFF;
+            connSince = now;
+          }
+        }
+        break;
+      }
+      case CONN_BACKOFF:
+        if (now - connSince >= CONNECT_BACKOFF_MS) {
+          connTriedBothRates = false;
+          connState = CONN_SETTLE;
+          connSince = now;
+        }
+        break;
+    }
+    return;
+  }
+
+  // Read poll: every read path in this file goes through pollRead(), which
+  // routes the SET ACK to the async update machine no matter which poll
+  // consumed it (the drain at the bottom of this function fires well before
+  // canRead()'s 1s floor opens).
+  if (canRead()) {
+    pollRead();
+  }
+
+  // Async SET: write when the line frees up.
+  if (updatePending && !awaitingAck && canSend(false)) {
+    byte packet[PACKET_LEN] = {};
+    createPacket(packet, wantedSettings);
+    // No control bits set = nothing to command. The unit still reacts to such
+    // packets (observed: resets its native AUTO-fan state machine), so skip.
+    // NB: if enableAutoUpdate() is ever used, make sure wanted/current cannot
+    // diverge on fields createPacket ignores (iSee) or sync() will spin here.
+    if (packet[6] == 0 && packet[7] == 0) {
+      GLOG_TRACE("MITSUBISHI", "UPDATE skipped (no pending control bits)");
+      updatePending = false;
+    } else {
+      GLOG_INFO("MITSUBISHI", "Sending UPDATE (Power=%s, Mode=%s, Temp=%sC)",
+                wantedSettings.power, wantedSettings.mode,
+                String(wantedSettings.temperature, 1).c_str());
+      writePacket(packet, PACKET_LEN);
+      updatePending = false;
+      awaitingAck = true;
+      ackDeadline = now + UPDATE_ACK_TIMEOUT_MS;
+    }
+  }
+  if (awaitingAck && (long)(now - ackDeadline) >= 0) {
+    awaitingAck = false;
+    if (updateRetries > 0) {
+      updateRetries--;
+      GLOG_WARN("MITSUBISHI", "Update ACK timeout; resending");
+      updatePending = true;
+    } else {
+      GLOG_WARN("MITSUBISHI", "Update ACK Timeout (2000ms)");
+    }
+  }
 
   // Heartbeat: sync status/settings at regular intervals
   static unsigned long lastSyncTime = 0;
@@ -234,8 +252,19 @@ void HeatPump::loop() {
 
   // Process incoming data/serial readings
   if (_HardSerial->available() > 0) {
-    readPacket();
+    pollRead();
   }
+}
+
+// The single classifier for consumed responses: clears awaitingAck on the SET
+// ACK so no read path can silently swallow it and trigger a spurious resend.
+int HeatPump::pollRead() {
+  int packetType = readPacket();
+  if (awaitingAck && packetType == RCVD_PKT_UPDATE_SUCCESS) {
+    GLOG_INFO("MITSUBISHI", "Update SUCCESS!");
+    awaitingAck = false;
+  }
+  return packetType;
 }
 
 void HeatPump::enableExternalUpdate() { externalUpdate = true; }
@@ -334,9 +363,7 @@ void HeatPump::setRemoteTemperature(float setting) {
   for (int i = 0; i < 21; i++) {
     packet[i] = 0x00;
   }
-  for (int i = 0; i < HEADER_LEN; i++) {
-    packet[i] = HEADER[i];
-  }
+  memcpy_P(packet, HEADER, HEADER_LEN);
   packet[5] = 0x07;
   if (setting > 0) {
     packet[6] = 0x01;
@@ -486,7 +513,7 @@ void HeatPump::sendCustomPacket(byte data[], int packetLength) {
                      ? PACKET_LEN
                      : packetLength; // ensure we are not exceeding PACKET_LEN
   byte packet[packetLength];
-  packet[0] = HEADER[0]; // add first header byte
+  packet[0] = pgm_read_byte(&HEADER[0]); // add first header byte
 
   // add data
   for (int i = 0; i < packetLength; i++) {
@@ -523,11 +550,12 @@ int HeatPump::lookupByteMapIndex(const char *valuesMap[], int len,
   return -1;
 }
 
+// byteMap always points at one of the PROGMEM tables above.
 const char *HeatPump::lookupByteMapValue(const char *valuesMap[],
                                          const byte byteMap[], int len,
                                          byte byteValue) {
   for (int i = 0; i < len; i++) {
-    if (byteMap[i] == byteValue) {
+    if (pgm_read_byte(&byteMap[i]) == byteValue) {
       return valuesMap[i];
     }
   }
@@ -537,7 +565,7 @@ const char *HeatPump::lookupByteMapValue(const char *valuesMap[],
 int HeatPump::lookupByteMapValue(const int valuesMap[], const byte byteMap[],
                                  int len, byte byteValue) {
   for (int i = 0; i < len; i++) {
-    if (byteMap[i] == byteValue) {
+    if (pgm_read_byte(&byteMap[i]) == byteValue) {
       return valuesMap[i];
     }
   }
@@ -566,38 +594,36 @@ void HeatPump::createPacket(byte *packet, heatpumpSettings settings) {
   for (int i = 0; i < 21; i++) {
     packet[i] = 0x00;
   }
-  for (int i = 0; i < HEADER_LEN; i++) {
-    packet[i] = HEADER[i];
-  }
+  memcpy_P(packet, HEADER, HEADER_LEN);
   if (settings.power != currentSettings.power) {
-    packet[8] = POWER[lookupByteMapIndex(POWER_MAP, 2, settings.power)];
-    packet[6] += CONTROL_PACKET_1[0];
+    packet[8] = pgm_read_byte(&POWER[lookupByteMapIndex(POWER_MAP, 2, settings.power)]);
+    packet[6] += pgm_read_byte(&CONTROL_PACKET_1[0]);
   }
   if (settings.mode != currentSettings.mode) {
-    packet[9] = MODE[lookupByteMapIndex(MODE_MAP, 5, settings.mode)];
-    packet[6] += CONTROL_PACKET_1[1];
+    packet[9] = pgm_read_byte(&MODE[lookupByteMapIndex(MODE_MAP, 5, settings.mode)]);
+    packet[6] += pgm_read_byte(&CONTROL_PACKET_1[1]);
   }
   if (!tempMode && settings.temperature != currentSettings.temperature) {
-    packet[10] = TEMP[lookupByteMapIndex(TEMP_MAP, 16, settings.temperature)];
-    packet[6] += CONTROL_PACKET_1[2];
+    packet[10] = pgm_read_byte(&TEMP[lookupByteMapIndex(TEMP_MAP, 16, settings.temperature)]);
+    packet[6] += pgm_read_byte(&CONTROL_PACKET_1[2]);
   } else if (tempMode && settings.temperature != currentSettings.temperature) {
     float temp = (settings.temperature * 2) + 128;
     packet[19] = (int)temp;
-    packet[6] += CONTROL_PACKET_1[2];
+    packet[6] += pgm_read_byte(&CONTROL_PACKET_1[2]);
   }
   if (settings.fan != currentSettings.fan) {
-    packet[11] = FAN[lookupByteMapIndex(FAN_MAP, 6, settings.fan)];
-    packet[6] += CONTROL_PACKET_1[3];
+    packet[11] = pgm_read_byte(&FAN[lookupByteMapIndex(FAN_MAP, 6, settings.fan)]);
+    packet[6] += pgm_read_byte(&CONTROL_PACKET_1[3]);
   }
   if (settings.vane != currentSettings.vane) {
-    packet[12] = VANE[lookupByteMapIndex(VANE_MAP, 7, settings.vane)];
-    packet[6] += CONTROL_PACKET_1[4];
+    packet[12] = pgm_read_byte(&VANE[lookupByteMapIndex(VANE_MAP, 7, settings.vane)]);
+    packet[6] += pgm_read_byte(&CONTROL_PACKET_1[4]);
   }
   if (settings.wideVane != currentSettings.wideVane) {
     packet[18] =
-        WIDEVANE[lookupByteMapIndex(WIDEVANE_MAP, 7, settings.wideVane)] |
+        pgm_read_byte(&WIDEVANE[lookupByteMapIndex(WIDEVANE_MAP, 7, settings.wideVane)]) |
         (wideVaneAdj ? 0x80 : 0x00);
-    packet[7] += CONTROL_PACKET_2[0];
+    packet[7] += pgm_read_byte(&CONTROL_PACKET_2[0]);
   }
   // add the checksum
   byte chkSum = checkSum(packet, 21);
@@ -606,16 +632,14 @@ void HeatPump::createPacket(byte *packet, heatpumpSettings settings) {
 
 void HeatPump::createInfoPacket(byte *packet, byte packetType) {
   // add the header to the packet
-  for (int i = 0; i < INFOHEADER_LEN; i++) {
-    packet[i] = INFOHEADER[i];
-  }
+  memcpy_P(packet, INFOHEADER, INFOHEADER_LEN);
 
   // set the mode - settings or room temperature
   if (packetType != PACKET_TYPE_DEFAULT) {
-    packet[5] = INFOMODE[packetType];
+    packet[5] = pgm_read_byte(&INFOMODE[packetType]);
   } else {
     // request current infoMode, and increment for the next request
-    packet[5] = INFOMODE[infoMode];
+    packet[5] = pgm_read_byte(&INFOMODE[infoMode]);
     if (infoMode == (INFOMODE_LEN - 1)) {
       infoMode = 0;
     } else {
@@ -634,11 +658,13 @@ void HeatPump::createInfoPacket(byte *packet, byte packetType) {
 }
 
 void HeatPump::writePacket(byte *packet, int length) {
-  char hexBuf[length * 3 + 1];
-  for (int i = 0; i < length; i++) {
-    snprintf(&hexBuf[i * 3], 4, "%02X ", packet[i]);
+  if (glog_trace_on()) {
+    char hexBuf[length * 3 + 1];
+    for (int i = 0; i < length; i++) {
+      snprintf(&hexBuf[i * 3], 4, "%02X ", packet[i]);
+    }
+    GLOG_TRACE("MITSUBISHI", "WRITE [%d]: %s", length, hexBuf);
   }
-  GLOG_TRACE("MITSUBISHI", "WRITE [%d]: %s", length, hexBuf);
 
   for (int i = 0; i < length; i++) {
     _HardSerial->write((uint8_t)packet[i]);
@@ -667,7 +693,7 @@ int HeatPump::readPacket() {
     while (_HardSerial->available() > 0 && !foundStart &&
            (millis() - readLoopStart < 1000)) {
       header[0] = _HardSerial->read();
-      if (header[0] == HEADER[0]) {
+      if (header[0] == pgm_read_byte(&HEADER[0])) {
         foundStart = true;
         GLOG_TRACE("MITSUBISHI", "Found start byte 0xFC");
         ESP.wdtFeed();
@@ -675,8 +701,7 @@ int HeatPump::readPacket() {
         delay(10); // found that this delay increases accuracy when reading,
                    // might not be needed though
       } else {
-        char hex[3]; snprintf(hex, 3, "%02X", header[0]);
-        GLOG_TRACE("MITSUBISHI", "Skipping noise byte: 0x%s", hex);
+        GLOG_TRACE("MITSUBISHI", "Skipping noise byte: 0x%02X", header[0]);
       }
       ESP.wdtFeed();
       yield();
@@ -698,8 +723,9 @@ int HeatPump::readPacket() {
     }
 
     // check header
-    if (header[0] == HEADER[0] && header[2] == HEADER[2] &&
-        header[3] == HEADER[3]) {
+    if (header[0] == pgm_read_byte(&HEADER[0]) &&
+        header[2] == pgm_read_byte(&HEADER[2]) &&
+        header[3] == pgm_read_byte(&HEADER[3])) {
       dataLength = header[4];
       GLOG_TRACE("MITSUBISHI", "Header OK. DataLength=%d", dataLength);
       if (dataLength > (PACKET_LEN - 6)) { // Header(5) + Checksum(1) = 6
@@ -742,13 +768,15 @@ int HeatPump::readPacket() {
       if (data[dataLength] == checksum) {
         lastRecv = millis();
 
-        char hexBuf[dataLength * 3 + 16];
-        int pos = 0;
-        for (int i = 0; i < INFOHEADER_LEN; i++)
-          pos += snprintf(&hexBuf[pos], 4, "%02X ", header[i]);
-        for (int i = 0; i <= dataLength; i++)
-          pos += snprintf(&hexBuf[pos], 4, "%02X ", data[i]);
-        GLOG_TRACE("MITSUBISHI", "READ [%d]: %s", dataLength + 6, hexBuf);
+        if (glog_trace_on()) {
+          char hexBuf[dataLength * 3 + 16];
+          int pos = 0;
+          for (int i = 0; i < INFOHEADER_LEN; i++)
+            pos += snprintf(&hexBuf[pos], 4, "%02X ", header[i]);
+          for (int i = 0; i <= dataLength; i++)
+            pos += snprintf(&hexBuf[pos], 4, "%02X ", data[i]);
+          GLOG_TRACE("MITSUBISHI", "READ [%d]: %s", dataLength + 6, hexBuf);
+        }
         if (packetCallback) {
           byte packet[37]; // we are going to put header[5] and data[32] into
                            // this, so the whole packet is sent to the callback
@@ -963,14 +991,11 @@ int HeatPump::readPacket() {
 
             if (flagsChanged || fanChanged || autoChanged) {
               if (flagsChanged) {
-                // ArduinoLog has no %02X — snprintf to a buffer + %s.
-                char hex[3];
-                snprintf(hex, sizeof(hex), "%02X", newFlags);
                 GLOG_INFO(
                     "MITSUBISHI",
-                    "RECV: RunState flags=0x%s (filter=%d defrost=%d "
+                    "RECV: RunState flags=0x%02X (filter=%d defrost=%d "
                     "preheat=%d blocked=%d)",
-                    hex,
+                    newFlags,
                     (newFlags & HP_STATUS_FILTER_DIRTY) ? 1 : 0,
                     (newFlags & HP_STATUS_DEFROST) ? 1 : 0,
                     (newFlags & HP_STATUS_PREHEAT) ? 1 : 0,

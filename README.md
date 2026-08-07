@@ -6,9 +6,9 @@ GootAC is a firmware for the ESP8266 (built for the Wemos D1 Mini v4 that I pers
 
 ## Key Features
 
-- **Native HomeKit Integration**: Pair directly with the Apple Home app for seamless ecosystem control.
+- **Native HomeKit Integration**: Pair directly with the Apple Home app.
 - **Multifunction Interface**:
-    - **HeaterCooler Service**: Primary control for Heating, Cooling, and Smart Auto modes. Includes integrated Fan Speed, Swing Mode, and Target Temperature offsets.
+    - **HeaterCooler Service**: Heat, Cool, and Smart Auto modes with heating/cooling threshold sliders and Swing Mode; fan speed is driven by the firmware.
     - **Dehumidifier Service**: Dedicated toggle for the unit's Dry (Dehumidify) mode.
 - **Embedded Diagnostics**: Flash-persistent system logs stored on-device and served via HTTP.
 - **OTA Updates**: Wireless firmware deployment via ArduinoOTA.
@@ -92,10 +92,15 @@ pip install -r requirements.txt
 
 ## Technical Specifications
 
-Logs are stored on the internal SPIFFS/LittleFS storage to preserve history across reboots and network instability. They can be viewed directly via the web browser:
-- `http://<DEVICE_IP>/log` - Current session logs.
-- `http://<DEVICE_IP>/log.old` - Archived logs from previous boot.
+Logs are stored on the internal LittleFS storage to preserve history across reboots and network instability. HTTP endpoints:
+- `http://<DEVICE_IP>/log` - Full durable history (INFO and up), oldest first; 512KB of rename-rotated generation files.
+- `http://<DEVICE_IP>/trace` - Verbose RAM ring (TRACE lives only here); `?clear` empties it.
+- `http://<DEVICE_IP>/loglevel?set=5` - Runtime verbosity (2..6, 5 = trace); reboot returns to the build default.
+- `http://<DEVICE_IP>/crash` - Pre-crash verbose ring, captured on the first boot after an exception/watchdog reset.
 - `http://<DEVICE_IP>/metrics` - Prometheus text-format metrics (heap, WiFi, TCP, HomeKit, AC state).
+- `http://<DEVICE_IP>/control?confirm=yes&...` - Out-of-band target-state writes and the external humidity feed (`humidity=`); drives the same code paths as HomeKit writes.
+- `http://<DEVICE_IP>/reboot?confirm=yes` - Plain reboot, pairings kept.
+- `http://<DEVICE_IP>/hk_reset?confirm=yes-wipe-pairings` - Wipe HomeKit pairings and reboot.
 
 ---
 
@@ -103,4 +108,4 @@ Logs are stored on the internal SPIFFS/LittleFS storage to preserve history acro
 Licensed under the GNU Lesser General Public License (LGPL).
 Incorporates logic and components from:
 - [Arduino-HomeKit-ESP8266](https://github.com/Mixiaoxiao/Arduino-HomeKit-ESP8266)
-- [SwiCago's HeatPump Library)](https://github.com/SwiCago/HeatPump)
+- [SwiCago's HeatPump Library](https://github.com/SwiCago/HeatPump)

@@ -2,7 +2,6 @@
 import click
 import subprocess
 import time
-import sys
 import re
 import serial.tools.list_ports
 import os
@@ -12,6 +11,7 @@ from zeroconf import Zeroconf, ServiceBrowser
 # --- GLOBAL CONFIGURATION ---
 # These variables control how manage.py filters and identifies devices
 DISCOVERY_PROJECT_NAME = "GootAC"         # Must match 'project' TXT record in firmware
+HOSTNAME_PREFIX = "GootAC-"              # Must match the hostname derivation in src/main.cpp
 DISCOVERY_TIMEOUT = 20                   # How long to listen for mDNS (seconds)
 MDNS_SERVICE_TYPE = "_arduino._tcp.local." # Primary mDNS service to browse
 
@@ -21,7 +21,6 @@ KEY_PROJECT = "project"
 KEY_VERSION = "version"
 KEY_UPTIME  = "uptime"
 KEY_RSSI    = "rssi"
-KEY_SDK     = "sdk"
 
 class GootACDiscovery:
     def __init__(self, filter_project=DISCOVERY_PROJECT_NAME):
@@ -53,8 +52,7 @@ class GootACDiscovery:
                         "address": ip,
                         "version": properties.get(KEY_VERSION, "?.?.?"),
                         "uptime": properties.get(KEY_UPTIME, "N/A"),
-                        "rssi": properties.get(KEY_RSSI, "N/A"),
-                        "sdk": properties.get(KEY_SDK, "N/A")
+                        "rssi": properties.get(KEY_RSSI, "N/A")
                     })
 
     def update_service(self, zeroconf, type, name):
@@ -85,8 +83,7 @@ class GootACDiscovery:
                     "address": port.device,
                     "version": "Local",
                     "uptime": "-",
-                    "rssi": "-",
-                    "sdk": "-"
+                    "rssi": "-"
                 })
 
     def get_devices(self):
@@ -125,9 +122,8 @@ def update_config_device_name(new_name):
 
 def hostname_to_device_name(hostname):
     """Extract DEVICE_NAME from a hostname like 'GootAC-Bedroom' -> 'Bedroom'"""
-    prefix = "GootAC-"
-    if hostname.startswith(prefix):
-        return hostname[len(prefix):]
+    if hostname.startswith(HOSTNAME_PREFIX):
+        return hostname[len(HOSTNAME_PREFIX):]
     return hostname
 
 def parse_version(v_str):
@@ -177,36 +173,20 @@ def display_devices_table(devices, title="Discovered Devices", target_version=No
 
     click.echo(f"\n{title}:")
     # Table Header
-    header = f"{'#':<3} {'Type':<12} {'Name/Host':<20} {'Address':<15} {'Ver':<8} {'Uptime':<8} {'RSSI':<6} {'SDK':<10}"
+    header = f"{'#':<3} {'Type':<12} {'Name/Host':<20} {'Address':<15} {'Ver':<8} {'Uptime':<8} {'RSSI':<6}"
     click.echo(header)
     click.echo("-" * len(header))
 
     for i, dev in enumerate(devices, 1):
-        ver_str = dev['version']
-        name = dev['name']
-        is_old = False
+        # Pad the raw version first, style after, so ANSI codes don't break alignment
+        ver = "-" if dev['type'] == "USB/Serial" else dev['version']
+        ver_str = f"{ver:<8}"
+        if (dev['type'] != "USB/Serial" and target_version and ver != "?.?.?"
+                and parse_version(ver) < parse_version(target_version)):
+            ver_str = click.style(ver_str, fg='red', bold=True)
 
-        if dev['type'] == "USB/Serial":
-            ver_str = "-"
-        else:
-            if target_version and dev['version'] != "?.?.?":
-                if parse_version(dev['version']) < parse_version(target_version):
-                    is_old = True
-                    ver_str = click.style(dev['version'], fg='red', bold=True)
-
-        # Adjust padding for ANSI codes if necessary, but click.echo treats stylized strings specially
-        # Actually, for table alignment, it's easier to use click.echo with style segments
-        line_num = f"{i:<3}"
-        dev_type = f"{dev['type']:<12}"
-        dev_name = f"{name[:20]:<20}"
-        addr = f"{dev['address']:<15}"
-        uptime = f"{dev['uptime']:<8}"
-        rssi = f"{dev['rssi']:<6}"
-        sdk = f"{dev['sdk']:<10}"
-
-        click.echo(f"{line_num} {dev_type} {dev_name} {addr} ", nl=False)
-        click.echo(f"{ver_str:<8}" if not is_old else ver_str + " " * (8 - len(dev['version'])), nl=False)
-        click.echo(f" {uptime} {rssi} {sdk}")
+        click.echo(f"{i:<3} {dev['type']:<12} {dev['name'][:20]:<20} "
+                   f"{dev['address']:<15} {ver_str} {dev['uptime']:<8} {dev['rssi']:<6}")
 
     click.echo("")
     return True
@@ -376,7 +356,7 @@ def install(port, no_erase):
     target_device_name = click.prompt("Enter device name (e.g., Bedroom, Suite)", default=default_device_name)
 
     # 4. Confirmation
-    derived_hostname = f"GootAC-{target_device_name}"
+    derived_hostname = f"{HOSTNAME_PREFIX}{target_device_name}"
     derived_accessory = f"{target_device_name} AC"
     click.echo(click.style("\n" + "="*40, fg='red'))
     click.echo(click.style("DANGER: FULL DEVICE WIPE", fg='red', bold=True))

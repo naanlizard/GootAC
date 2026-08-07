@@ -6,16 +6,6 @@
 #include "ac_controller.h"
 #include "config.h"
 
-#ifndef MIN_VALID_ROOM_TEMP_C
-#define MIN_VALID_ROOM_TEMP_C 10.0f
-#endif
-#ifndef MAX_VALID_ROOM_TEMP_C
-#define MAX_VALID_ROOM_TEMP_C 45.0f
-#endif
-
-extern char hostName[32];
-extern char accessoryName[32];
- 
 // Identify callback (required by HAP spec)
 void my_accessory_identify(homekit_value_t _value) {
     ac_controller_identify();
@@ -29,7 +19,7 @@ homekit_characteristic_t cha_ac_active = HOMEKIT_CHARACTERISTIC_(ACTIVE, 0);
 homekit_characteristic_t cha_ac_current_state = HOMEKIT_CHARACTERISTIC_(CURRENT_HEATER_COOLER_STATE, 0);
 homekit_characteristic_t cha_ac_target_state = HOMEKIT_CHARACTERISTIC_(TARGET_HEATER_COOLER_STATE, 0);
 homekit_characteristic_t cha_ac_current_temp = HOMEKIT_CHARACTERISTIC_(CURRENT_TEMPERATURE, 22.0, .min_value = (float[]) {MIN_VALID_ROOM_TEMP_C}, .max_value = (float[]) {MAX_VALID_ROOM_TEMP_C});
-// Matches TEMP_MAP, the CN105 setpoint vocabulary. Smart Auto aims auto_pull_c()
+// Matches TEMP_MAP, the CN105 setpoint vocabulary. Smart Auto aims pull_c()
 // inside the range, so a wider slider would target temperatures the unit cannot
 // be told, and the call would never reach its release point.
 homekit_characteristic_t cha_ac_cooling_threshold = HOMEKIT_CHARACTERISTIC_(COOLING_THRESHOLD_TEMPERATURE, 24.0, .min_value = (float[]) {16}, .max_value = (float[]) {31});
@@ -45,18 +35,12 @@ homekit_characteristic_t cha_ac_status_fault = HOMEKIT_CHARACTERISTIC_(STATUS_FA
 homekit_characteristic_t cha_dehumidifier_active = HOMEKIT_CHARACTERISTIC_(ACTIVE, 0);
 homekit_characteristic_t cha_dehumidifier_current_state = HOMEKIT_CHARACTERISTIC_(CURRENT_HUMIDIFIER_DEHUMIDIFIER_STATE, 0);
 homekit_characteristic_t cha_dehumidifier_target_state = HOMEKIT_CHARACTERISTIC_(TARGET_HUMIDIFIER_DEHUMIDIFIER_STATE, 2, .valid_values = { .count = 1, .values = (uint8_t[]) {2} });
-// HAP-required characteristic for the HUMIDIFIER_DEHUMIDIFIER service.
-// CN105 does not expose an indoor humidity reading on this hardware
-// (confirmed by exhaustive sweep + Mitsubishi's licensed Modbus
-// gateway publishing no humidity register). Fixed 50% stub satisfies
-// the spec so iOS Home stops reporting "No Response" for the tile.
-// Seeded at 50 and overwritten by ac_controller_report_humidity() once anything
-// pushes a reading to /control. With no feed it stays at the seed, so treat a
-// flat 50 as "never reported" rather than as a measurement.
+// CN105 reports no humidity; HAP requires this characteristic. A flat 50.0
+// means "never reported" — /control?humidity= pushes overwrite the seed.
 homekit_characteristic_t cha_dehumidifier_current_humidity = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 50.0);
 // Target RH. Nothing consumes it yet: DRY still engages on the idle band
 // regardless of this value or of any reported reading.
-homekit_characteristic_t cha_dehumidifier_threshold = HOMEKIT_CHARACTERISTIC_(RELATIVE_HUMIDITY_DEHUMIDIFIER_THRESHOLD, 55.0);
+homekit_characteristic_t cha_dehumidifier_threshold = HOMEKIT_CHARACTERISTIC_(RELATIVE_HUMIDITY_DEHUMIDIFIER_THRESHOLD, HUMIDITY_THRESHOLD_DEFAULT);
 
 static homekit_characteristic_t cha_dehumidifier_name = HOMEKIT_CHARACTERISTIC_(NAME, "AC Dehumidifier");
 static homekit_characteristic_t cha_dehumidifier_conf_name = HOMEKIT_CHARACTERISTIC_(CONFIGURED_NAME, "Dehumidifier");
@@ -126,27 +110,10 @@ homekit_accessory_t *accessories[] = {
 homekit_server_config_t config = {
     .accessories = accessories,
     .password = "111-22-333",
-    // Bump every time the accessory database changes (services/characteristics
-    // added or removed). iOS Home compares this number against what it has
-    // cached for the paired accessory; if higher, it re-reads /accessories
-    // and picks up the new schema. Pairings survive the bump.
-    //
-    // History:
-    //   1 = up to v1.10 (HEATER_COOLER + HUMIDIFIER_DEHUMIDIFIER bare set)
-    //   2 = v1.11 — added cha_ac_status_fault to HEATER_COOLER and
-    //               cha_dehumidifier_current_humidity to HUMIDIFIER_DEHUMIDIFIER
-    //   3 = v1.13 — removed cha_ac_rotation_speed + cha_ac_target_fan_state
-    //               from HEATER_COOLER (fan permanently delegated to AC AUTO)
-    //   4,5 = v1.18 canary-only fan-control experiment (rotation_speed, then
-    //         + target_fan_state); flashed only to Simples, retired same night
-    //         after iOS rendered the controls poorly
-    //   6 = v1.18 — fan characteristics removed again; must exceed the 4/5
-    //       schemas cached by the canary's paired controller
-    //   7 = v1.33: threshold min/max widened from 16-31 to 5-40. Nothing added
-    //       or removed, but iOS caches the declared range as part of the schema
-    //   8 = v1.36: reverted to 16-31, which is what TEMP_MAP can express
-    //   9 = v1.41: added cha_dehumidifier_threshold to HUMIDIFIER_DEHUMIDIFIER
-    //  10 = v1.42: threshold now gated by HUMIDITY_UNITS, so the database
-    //       differs per unit; both variants ship 10.
+    // Bump on every accessory-database change, including declared min/max
+    // ranges — iOS caches those as part of the schema and re-reads
+    // /accessories only when the number rises. Pairings survive a bump.
+    // Only ever increase it: paired controllers have cached every value
+    // shipped OR canaried up to the current one.
     .config_number = 10
 };

@@ -106,6 +106,8 @@ bool HeatPump::update() {
   return true;
 }
 
+bool HeatPump::updateInFlight() { return s_updatePending; }
+
 void HeatPump::sync(byte /*packetType*/) {
   if (settingsChangedCallback) settingsChangedCallback();
   if (statusChangedCallback) statusChangedCallback(currentStatus);
@@ -290,30 +292,6 @@ void HeatPump::loop() {
   }
 }
 
-// ---- HeatPump.h declares these free functions; provide stubs so the linker
-// is satisfied even if the controller never calls them.
-bool operator==(const heatpumpSettings &lhs, const heatpumpSettings &rhs) {
-  return lhs.power == rhs.power && lhs.mode == rhs.mode &&
-         lhs.temperature == rhs.temperature && lhs.fan == rhs.fan &&
-         lhs.vane == rhs.vane && lhs.wideVane == rhs.wideVane &&
-         lhs.iSee == rhs.iSee;
-}
-bool operator!=(const heatpumpSettings &lhs, const heatpumpSettings &rhs) {
-  return !(lhs == rhs);
-}
-bool operator!(const heatpumpSettings &settings) {
-  return settings.power == nullptr && settings.mode == nullptr;
-}
-bool operator==(const heatpumpTimers &lhs, const heatpumpTimers &rhs) {
-  return lhs.mode == rhs.mode && lhs.onMinutesSet == rhs.onMinutesSet &&
-         lhs.onMinutesRemaining == rhs.onMinutesRemaining &&
-         lhs.offMinutesSet == rhs.offMinutesSet &&
-         lhs.offMinutesRemaining == rhs.offMinutesRemaining;
-}
-bool operator!=(const heatpumpTimers &lhs, const heatpumpTimers &rhs) {
-  return !(lhs == rhs);
-}
-
 // ---- Inject helpers driven by main.cpp /fake/* HTTP routes
 
 void gootac_fake_inject_external(const char *power, const char *mode,
@@ -323,11 +301,11 @@ void gootac_fake_inject_external(const char *power, const char *mode,
   if (power && *power) s.power = (strcmp(power, "ON") == 0) ? "ON" : "OFF";
   if (mode && *mode) {
     // Normalize to one of the canonical MODE_MAP strings.
-    if (strcmp(mode, "HEAT") == 0) s.mode = "HEAT";
-    else if (strcmp(mode, "COOL") == 0) s.mode = "COOL";
-    else if (strcmp(mode, "AUTO") == 0) s.mode = "AUTO";
-    else if (strcmp(mode, "DRY")  == 0) s.mode = "DRY";
-    else if (strcmp(mode, "FAN")  == 0) s.mode = "FAN";
+    for (uint8_t i = 0; i < 5; i++)
+      if (strcmp(mode, g_instance->MODE_MAP[i]) == 0) {
+        s.mode = g_instance->MODE_MAP[i];
+        break;
+      }
   }
   if (temperature > 0) s.temperature = temperature;
   g_instance->setSettings(s);

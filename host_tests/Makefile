@@ -10,9 +10,10 @@ test_decide: test_decide.cpp ../src/ac_decision.cpp ../src/ac_decision.h
 run: check-ref test_decide
 	./test_decide
 
-# The oracle in test_decide.cpp is derived from ref_extract_a805f40.txt.
-# Re-extract from git and diff, so silent drift from the pinned commit fails
-# the run. Skipped gracefully outside a git checkout.
+# The oracle's step-down machinery (only — see the decide_reference note in
+# test_decide.cpp) descends from ref_extract_a805f40.txt. Re-extract from git
+# and diff, so silent drift from the pinned commit fails the run. Skipped
+# gracefully outside a git checkout.
 check-ref:
 	@if git -C .. rev-parse a805f40 >/dev/null 2>&1; then \
 	  { git -C .. show a805f40:src/ac_controller.cpp | sed -n '375,410p'; \

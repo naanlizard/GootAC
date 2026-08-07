@@ -4,7 +4,6 @@
 #include "config.h"
 #include <Arduino.h>
 #include <math.h>
-#include <ArduinoLog.h>
 #include <ESP8266WiFi.h>
 #include <LittleFS.h>
 #include <arduino_homekit_server.h>
@@ -14,30 +13,17 @@ extern "C" {
 #include <lwip/priv/tcp_priv.h>
 }
 
-// Plausibility bounds on the room-temperature sensor reading. The Mitsubishi
-// CN105 protocol reports 10–41°C in 1°C steps via the standard packet plus
-// half-degree extended packets, so anything outside [MIN, MAX] is a sensor
-// glitch or parse error and must not be pushed to HomeKit. Defaults match
-// Lisbon climate; override in config.h.
-#ifndef MIN_VALID_ROOM_TEMP_C
-#define MIN_VALID_ROOM_TEMP_C 10.0f
-#endif
-#ifndef MAX_VALID_ROOM_TEMP_C
-#define MAX_VALID_ROOM_TEMP_C 45.0f
-#endif
-
-// Returns info about the current HomeKit client performing an action
-static String get_client_info() {
+// Formats the current HomeKit client into out ("System/Local" for none).
+static void get_client_info(char *out, size_t n) {
   client_context_t *ctx = (client_context_t *)homekit_get_client_id();
-  if (!ctx || !ctx->socket)
-    return "System/Local";
-
+  if (!ctx || !ctx->socket) {
+    strncpy(out, "System/Local", n - 1);
+    out[n - 1] = '\0';
+    return;
+  }
   IPAddress ip = ctx->socket->remoteIP();
-  int pairing_id = ctx->pairing_id;
-
-  char buf[64];
-  snprintf(buf, sizeof(buf), "%s (ID:%d)", ip.toString().c_str(), pairing_id);
-  return String(buf);
+  snprintf(out, n, "%u.%u.%u.%u (ID:%d)", ip[0], ip[1], ip[2], ip[3],
+           ctx->pairing_id);
 }
 
 // External specialized HK log implementation
@@ -48,7 +34,9 @@ void hk_log_info(const char *fmt, ...) {
   vsnprintf_P(buf, sizeof(buf), fmt, args);
   va_end(args);
 
-  Log.infoln(F("[HOMEKIT] %s (Client: %s)"), buf, get_client_info().c_str());
+  char client[64];
+  get_client_info(client, sizeof(client));
+  glog_log(GLOG_L_INFO, "HOMEKIT", PSTR("%s (Client: %s)"), buf, client);
 }
 
 static HeatPump *hp;
@@ -65,35 +53,42 @@ static DecisionOutput g_last_decision;
 static CompGateState g_comp_gate;
 static bool g_comp_deferred = false;   // last tick deferred a signature change; for /metrics
 
+// MODE_MAP index for a reported mode string; -1 for anything unrecognized.
+static int8_t mode_index_from_str(const char *mode) {
+  for (int8_t i = 0; i < 5; i++)
+    if (mode && strcmp(mode, hp->MODE_MAP[i]) == 0) return i;
+  return -1;
+}
+
 // Signature of what the hardware reports right now. Unknown mode maps to the
 // AUTO class so the gate stays conservative on anything unrecognized.
 static uint8_t hw_comp_sig() {
   heatpumpSettings s = hp->getSettings();
   bool on = s.power && strcmp(s.power, "ON") == 0;
-  uint8_t idx = 4;
-  for (uint8_t i = 0; i < 5; i++)
-    if (s.mode && strcmp(s.mode, hp->MODE_MAP[i]) == 0) { idx = i; break; }
-  return comp_sig(on, idx);
+  int8_t idx = mode_index_from_str(s.mode);
+  return comp_sig(on, idx < 0 ? MODE_IDX_AUTO : (uint8_t)idx);
 }
 
-static uint8_t g_fan_target_idx = 0;   // last commanded fan index, for /metrics
-static float   g_control_delta_c = 0.0f;
-
-// The indoor fan is driven directly by ac_decide(); see src/ac_decision.cpp.
-
-// Helper: Calculate checksum for binary integrity
-uint32_t calculate_checksum(TargetState *ts) {
+// Sum of the struct bytes ahead of the trailing uint32 checksum field.
+static uint32_t checksum_bytes(const void *p, size_t struct_size) {
   uint32_t sum = 0;
-  uint8_t *bytes = (uint8_t *)ts;
-  for (size_t i = 0; i < sizeof(TargetState) - 4; i++) {
-    sum += bytes[i];
-  }
+  const uint8_t *bytes = (const uint8_t *)p;
+  for (size_t i = 0; i < struct_size - 4; i++) sum += bytes[i];
   return sum;
+}
+
+// Logs currentState's user-facing fields under a caller-supplied headline.
+static void log_target_state(const char *what) {
+  char cBuf[10], hBuf[10];
+  dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
+  dtostrf(currentState.heating_threshold, 1, 1, hBuf);
+  GLOG_INFO("SYS", "%s (Active: %d, Mode: %d, C: %s, H: %s)", what,
+            currentState.active, currentState.target_mode, cBuf, hBuf);
 }
 
 // Save and Load binary state
 void save_target_state() {
-  currentState.checksum = calculate_checksum(&currentState);
+  currentState.checksum = checksum_bytes(&currentState, sizeof(TargetState));
   // Skip byte-identical rewrites — most save calls repersist unchanged state.
   static TargetState lastSaved;
   static bool haveSaved = false;
@@ -105,11 +100,7 @@ void save_target_state() {
     f.close();
     lastSaved = currentState;
     haveSaved = true;
-    char cBuf[10], hBuf[10];
-    dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
-    dtostrf(currentState.heating_threshold, 1, 1, hBuf);
-    GLOG_INFO("SYS", "Target State saved to LittleFS (Active: %d, Mode: %d, C: %s, H: %s)", 
-              currentState.active, currentState.target_mode, cBuf, hBuf);
+    log_target_state("Target State saved to LittleFS");
   } else {
     GLOG_ERROR("SYS", "Failed to open Target State for writing!");
   }
@@ -122,7 +113,7 @@ static void apply_default_target_state() {
   currentState.heating_threshold = 22.0;
   currentState.swing_mode = 0;
   currentState.dehumidifier = 0;
-  currentState.humidity_threshold = 55.0;
+  currentState.humidity_threshold = HUMIDITY_THRESHOLD_DEFAULT;
 }
 
 // Restored and migrated state reaches ac_decide() without passing through a
@@ -171,11 +162,7 @@ static bool try_migrate_legacy_v12(File &f) {
   currentState.swing_mode = legacy.swing_mode;
   currentState.dehumidifier = legacy.dehumidifier;
   sanitize_loaded_thresholds();   // legacy admits 10-40C, unordered
-  char cBuf[10], hBuf[10];
-  dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
-  dtostrf(currentState.heating_threshold, 1, 1, hBuf);
-  GLOG_INFO("SYS", "Migrated v1.12 -> v1.13 target state (Active: %d, Mode: %d, C: %s, H: %s)",
-            currentState.active, currentState.target_mode, cBuf, hBuf);
+  log_target_state("Migrated v1.12 -> v1.13 target state");
   save_target_state();
   return true;
 }
@@ -203,23 +190,16 @@ static bool try_migrate_legacy_v13(File &f) {
   LegacyTargetStateV13 legacy;
   f.seek(0);
   if (f.readBytes((char *)&legacy, sizeof(legacy)) != sizeof(legacy)) return false;
-  uint32_t sum = 0;
-  const uint8_t *bytes = (const uint8_t *)&legacy;
-  for (size_t i = 0; i < sizeof(legacy) - 4; i++) sum += bytes[i];
-  if (sum != legacy.checksum) return false;
+  if (checksum_bytes(&legacy, sizeof(legacy)) != legacy.checksum) return false;
   currentState.active = legacy.active;
   currentState.target_mode = legacy.target_mode;
   currentState.cooling_threshold = legacy.cooling_threshold;
   currentState.heating_threshold = legacy.heating_threshold;
   currentState.swing_mode = legacy.swing_mode;
   currentState.dehumidifier = legacy.dehumidifier;
-  currentState.humidity_threshold = 55.0;
+  currentState.humidity_threshold = HUMIDITY_THRESHOLD_DEFAULT;
   sanitize_loaded_thresholds();
-  char cBuf[10], hBuf[10];
-  dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
-  dtostrf(currentState.heating_threshold, 1, 1, hBuf);
-  GLOG_INFO("SYS", "Migrated legacy target state (Active: %d, Mode: %d, C: %s, H: %s)",
-            currentState.active, currentState.target_mode, cBuf, hBuf);
+  log_target_state("Migrated legacy target state");
   save_target_state();
   return true;
 }
@@ -239,13 +219,10 @@ void load_target_state() {
     TargetState loaded;
     size_t read = f.readBytes((char *)&loaded, sizeof(TargetState));
     f.close();
-    if (read == sizeof(TargetState) && calculate_checksum(&loaded) == loaded.checksum) {
+    if (read == sizeof(TargetState) &&
+        checksum_bytes(&loaded, sizeof(TargetState)) == loaded.checksum) {
       currentState = loaded;
-      char cBuf[10], hBuf[10];
-      dtostrf(currentState.cooling_threshold, 1, 1, cBuf);
-      dtostrf(currentState.heating_threshold, 1, 1, hBuf);
-      GLOG_INFO("SYS", "Target State loaded successfully (Active: %d, Mode: %d, C: %s, H: %s)",
-                currentState.active, currentState.target_mode, cBuf, hBuf);
+      log_target_state("Target State loaded successfully");
       sanitize_loaded_thresholds();
       return;
     }
@@ -327,7 +304,6 @@ static bool pending_update = false;
 static bool pending_sync_request = false;
 
 // Timing and guards
-static unsigned long lastSetTime = 0;
 static unsigned long lastInteractionTime = 0;
 static bool identify_active = false;
 static unsigned long identify_start = 0;
@@ -475,9 +451,7 @@ void ac_controller_init(HeatPump *heatPumpInstance) {
 void update_physical_ac() {
   if (!hp || !hp->isConnected()) return;
 
-  // Gather inputs, decide (pure function), then apply below. The apply code
-  // from the rationale block onward is unchanged from a805f40; these local
-  // aliases keep it diff-identical.
+  // Gather inputs, decide (pure function), then apply below.
   DecisionInput din;
   din.active = (currentState.active == 1);
   din.target_mode = currentState.target_mode; // 0:Auto, 1:Heat, 2:Cool
@@ -489,8 +463,6 @@ void update_physical_ac() {
 
   const DecisionOutput dout = ac_decide(din, g_decision_state);
   g_last_decision = dout;
-  g_fan_target_idx = dout.fan_idx;
-  g_control_delta_c = dout.control_delta_c;
 
   // Compressor gate: seed once from the library's view (self-corrects via the
   // external-sync observe within one settings poll; boot counts as a transition
@@ -515,50 +487,45 @@ void update_physical_ac() {
     g_comp_deferred = false;
   }
 
-  bool target_active = din.active;
-  uint8_t hk_target_mode = din.target_mode;
-  float roomTemp = din.room_temp;
-  bool dehumidify = din.dehumidify;
-
   bool hpPower = dout.power;
   uint8_t hpMode = dout.mode; // Library Index: 0:HEAT, 1:DRY, 2:COOL, 3:FAN, 4:AUTO
   float hpTemp = dout.temp;
-  // Fan target comes straight from ac_decide()'s staircase; 0 delegates
-  // to the unit's native AUTO. g_fan_target_idx was already set from dout above.
+  // From ac_decide()'s staircase; 0 delegates to the unit's native AUTO fan.
   uint8_t fan_idx = dout.fan_idx;
 
-  // --- Decision Logging (Rationale) ---
-  char rationale[128] = {0};
-  char tempBuf[10];
-  
-  if (!target_active) {
-    strncpy_P(rationale, dehumidify ? PSTR("Logic: Target OFF, dehumidifying")
-                                    : PSTR("Logic: Target OFF"), sizeof(rationale)-1);
-  } else if (hk_target_mode == 1) { // HEAT
-    dtostrf(hpTemp, 1, 1, tempBuf);
-    snprintf_P(rationale, sizeof(rationale),
-               hpMode == 0 ? PSTR("Logic: HEAT call (Target %sC)")
-                           : PSTR("Logic: HEAT idle (Target %sC)"), tempBuf);
-  } else if (hk_target_mode == 2) { // COOL
-    dtostrf(hpTemp, 1, 1, tempBuf);
-    snprintf_P(rationale, sizeof(rationale),
-               hpMode == 2 ? PSTR("Logic: COOL call (Target %sC)")
-                           : PSTR("Logic: COOL idle (Target %sC)"), tempBuf);
-  } else {
-    dtostrf(roomTemp, 1, 1, tempBuf);
-    snprintf_P(rationale, sizeof(rationale),
-               hpMode == 1 ? PSTR("Logic: Smart Auto dehumidifying, Room %sC")
-                           : PSTR("Logic: Smart Auto decision based on Room %sC"),
-               tempBuf);
+  if (glog_trace_on()) {
+    // --- Decision Logging (Rationale) ---
+    char rationale[128] = {0};
+    char tempBuf[10];
+
+    if (!din.active) {
+      strncpy_P(rationale, din.dehumidify ? PSTR("Logic: Target OFF, dehumidifying")
+                                          : PSTR("Logic: Target OFF"), sizeof(rationale)-1);
+    } else if (din.target_mode == 1) { // HEAT
+      dtostrf(hpTemp, 1, 1, tempBuf);
+      snprintf_P(rationale, sizeof(rationale),
+                 hpMode == 0 ? PSTR("Logic: HEAT call (Target %sC)")
+                             : PSTR("Logic: HEAT idle (Target %sC)"), tempBuf);
+    } else if (din.target_mode == 2) { // COOL
+      dtostrf(hpTemp, 1, 1, tempBuf);
+      snprintf_P(rationale, sizeof(rationale),
+                 hpMode == 2 ? PSTR("Logic: COOL call (Target %sC)")
+                             : PSTR("Logic: COOL idle (Target %sC)"), tempBuf);
+    } else {
+      dtostrf(din.room_temp, 1, 1, tempBuf);
+      snprintf_P(rationale, sizeof(rationale),
+                 hpMode == 1 ? PSTR("Logic: Smart Auto dehumidifying, Room %sC")
+                             : PSTR("Logic: Smart Auto decision based on Room %sC"),
+                 tempBuf);
+    }
+
+    static char lastRationale[128] = {0};
+    if (strcmp(lastRationale, rationale) != 0) {
+      GLOG_TRACE("MITSUBISHI", "%s", rationale);
+      strncpy(lastRationale, rationale, sizeof(lastRationale)-1);
+    }
   }
 
-  static char lastRationale[128] = {0};
-  if (strcmp(lastRationale, rationale) != 0) {
-    GLOG_TRACE("MITSUBISHI", "%s", rationale);
-    strncpy(lastRationale, rationale, sizeof(lastRationale)-1);
-  }
-
-  // Fan target already decided by ac_decide() (fan_idx; 0 = delegate to AUTO).
   const char *prev_fan = hp->getWantedSettings().fan;
 
   // Identify Override
@@ -569,11 +536,9 @@ void update_physical_ac() {
     hp->setFanSpeedIndex(5); // 4 (Max)
   } else {
     hp->setVaneIndex(currentState.swing_mode == 1 ? 6 : 0); // 6:SWING, 0:AUTO
-    // Fan driven by ac_decide(); 0 = delegate to AUTO.
     hp->setFanSpeedIndex(fan_idx);
   }
 
-  unsigned long now = millis();
   bool changed = false;
   bool pu = pending_update;
   bool fan_changed = (strcmp(prev_fan, hp->getWantedSettings().fan) != 0);
@@ -585,7 +550,7 @@ void update_physical_ac() {
     GLOG_INFO("MITSUBISHI", "COMMAND: Power -> %s (Currently: %s, Wanted: %s)", 
               hpPower ? "ON" : "OFF", hp->getPowerSettingBool() ? "ON" : "OFF", wanted.power);
     hp->setPowerSetting(hpPower);
-    lastSetTime = now; changed = true;
+    changed = true;
   }
   
   if (hpPower) {
@@ -594,21 +559,21 @@ void update_physical_ac() {
        GLOG_INFO("MITSUBISHI", "COMMAND: Mode -> %s (Currently: %s, Wanted: %s)", 
                  hp->MODE_MAP[hpMode], hp->getModeSetting(), wanted.mode);
        hp->setModeIndex(hpMode);
-       lastSetTime = now; changed = true;
+       changed = true;
     }
     
     // Temp: the library quantizes to the unit's grid; treat as changed only
     // if wantedSettings moved (raw-vs-quantized compares re-fire forever).
     // FAN and DRY carry no setpoint. Without the DRY case the untouched
     // DecisionOutput default of 21.0 is written on every entry into DRY.
-    if (hpMode != 3 && hpMode != 1) {
+    if (hpMode != MODE_IDX_FAN && hpMode != MODE_IDX_DRY) {
       hp->setTemperature(hpTemp);
       float newTemp = hp->getWantedSettings().temperature;
       if (newTemp != wanted.temperature) {
         char tempBuf[10];
         dtostrf(newTemp, 1, 1, tempBuf);
         GLOG_INFO("MITSUBISHI", "COMMAND: Temp -> %sC", tempBuf);
-        lastSetTime = now; changed = true;
+        changed = true;
       }
     }
   }
@@ -643,7 +608,9 @@ void ac_controller_loop() {
     update_physical_ac();
     lastUpdate = millis();
 
-    if (pending_sync_request && hp && hp->isConnected()) {
+    // Wait out an in-flight SET: an info request sent before it lands would
+    // read back pre-SET state.
+    if (pending_sync_request && hp && hp->isConnected() && !hp->updateInFlight()) {
       hp->sync(hp->RQST_PKT_SETTINGS);
       pending_sync_request = false;
     }
@@ -656,6 +623,8 @@ void ac_controller_sync_from_ac() {
 
   bool isExternal = hp->wasExternalUpdate();
   heatpumpSettings s = hp->getSettings();
+  const bool physOn = s.power && strcmp(s.power, "ON") == 0;
+  const int8_t mode_idx = mode_index_from_str(s.mode);
 
   // 1. Update Current Temperature (Always)
   float roomTemp = hp->getRoomTemperature();
@@ -682,7 +651,7 @@ void ac_controller_sync_from_ac() {
     comp_gate_observe_external(g_comp_gate, hw_comp_sig(), millis());
 
     // Sync Power -> Active
-    uint8_t physActive = (strcmp(s.power, "ON") == 0) ? 1 : 0;
+    uint8_t physActive = physOn ? 1 : 0;
     if (currentState.active != physActive) {
       currentState.active = physActive;
       cha_ac_active.value.uint8_value = physActive;
@@ -694,9 +663,9 @@ void ac_controller_sync_from_ac() {
     // Only remote-chosen HEAT/COOL/AUTO is user intent: FAN/DRY match the
     // firmware's own idle band, and Smart Auto never syncs mode back.
     int8_t hkTargetMode = -1;
-    if (strcmp(s.mode, "HEAT") == 0) hkTargetMode = 1;
-    else if (strcmp(s.mode, "COOL") == 0) hkTargetMode = 2;
-    else if (strcmp(s.mode, "AUTO") == 0) hkTargetMode = 0;
+    if (mode_idx == MODE_IDX_HEAT) hkTargetMode = 1;
+    else if (mode_idx == MODE_IDX_COOL) hkTargetMode = 2;
+    else if (mode_idx == MODE_IDX_AUTO) hkTargetMode = 0;
 
     if (currentState.target_mode != 0 && hkTargetMode >= 0 &&
         currentState.target_mode != hkTargetMode) {
@@ -715,17 +684,14 @@ void ac_controller_sync_from_ac() {
 
   if (cha_ac_active.value.uint8_value == 0) {
     current_state = 0; // INACTIVE
+  } else if (!physOn) {
+    current_state = 1; // IDLE (idle band)
+  } else if (mode_idx == MODE_IDX_HEAT) {
+    current_state = 2;
+  } else if (mode_idx == MODE_IDX_COOL) {
+    current_state = 3;
   } else {
-    // Unit is Active in HomeKit. Decide if it's Cooling, Heating, or Idle.
-    bool physOn = (strcmp(s.power, "ON") == 0);
-    
-    if (!physOn) {
-      current_state = 1; // IDLE (Deadband)
-    } else {
-      if (strcmp(s.mode, "HEAT") == 0) current_state = 2;
-      else if (strcmp(s.mode, "COOL") == 0) current_state = 3;
-      else current_state = 1; // FAN/DRY/AUTO(wait) -> IDLE
-    }
+    current_state = 1; // FAN/DRY/AUTO(wait) -> IDLE
   }
 
   if (cha_ac_current_state.value.uint8_value != current_state) {
@@ -738,16 +704,9 @@ void ac_controller_sync_from_ac() {
   }
 
   // 4. Update Dehumidifier Current State (0:Inactive, 1:Idle, 3:Dehumidifying).
-  // Report Dehumidifying whenever the service is active and the AC is
-  // in DRY mode with power on. The earlier "coil cold = byte 1..8"
-  // predicate was based on a wrong interpretation of statusByte3 as a
-  // coil temperature, and has been removed.
   uint8_t dehum_state = 0; // 0 = Inactive (service off)
-  if (cha_dehumidifier_active.value.uint8_value == 1) {
-    bool physOn = (strcmp(s.power, "ON") == 0);
-    bool inDry  = (strcmp(s.mode, "DRY") == 0);
-    dehum_state = (physOn && inDry) ? 3 : 1;
-  }
+  if (cha_dehumidifier_active.value.uint8_value == 1)
+    dehum_state = (physOn && mode_idx == MODE_IDX_DRY) ? 3 : 1;
   if (cha_dehumidifier_current_state.value.uint8_value != dehum_state) {
     cha_dehumidifier_current_state.value.uint8_value = dehum_state;
     homekit_characteristic_notify(&cha_dehumidifier_current_state,
@@ -869,13 +828,14 @@ void ac_controller_write_metrics(Print& out) {
     m_b(out, F("gootac_target_active"), F("1 if the HomeKit HeaterCooler service is active, else 0."), currentState.active != 0);
     m_b(out, F("gootac_swing_mode"),    F("1 if vane swing is enabled, else 0."),                      currentState.swing_mode != 0);
     m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
-    m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 1=QUIET, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_fan_target_idx);
-    m_f(out, F("gootac_control_delta_celsius"), F("Fan-driving delta: >0 short of the commanded target, <=0 depth past it (idle band: vs its anchor target); 0 when the fan is delegated."), g_control_delta_c);
+    m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 1=QUIET, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_last_decision.fan_idx);
+    m_f(out, F("gootac_control_delta_celsius"), F("Fan-driving delta: >0 short of the commanded target, <=0 depth past it (idle band: vs its anchor target); 0 when the fan is delegated."), g_last_decision.control_delta_c);
     m_b(out, F("gootac_dehumidifier_active"), F("1 if the HomeKit dehumidifier service is targeted on, else 0."), currentState.dehumidifier != 0);
     m_b(out, F("gootac_decided_power"), F("Last decision: 1 if the unit should be powered on."), g_last_decision.power);
     m_i(out, F("gootac_decided_mode_index"), F("Last decision: MODE_MAP index (0 HEAT,1 DRY,2 COOL,3 FAN,4 AUTO); meaningful only when decided power=1."), g_last_decision.mode);
-    m_f(out, F("gootac_decided_temp_celsius"), F("Last decision: setpoint in Celsius; not commanded when mode index=3."), g_last_decision.temp);
-    m_i(out, F("gootac_sa_mode"), F("Call state, all modes: -1 uninit, 0 HEAT call, 2 COOL call, 3 idle band."), g_decision_state.sa_mode);
+    m_f(out, F("gootac_decided_temp_celsius"), F("Last decision: setpoint in Celsius; not commanded when mode index is 3 or 1."), g_last_decision.temp);
+    m_i(out, F("gootac_call_state"), F("Call state, all modes: -1 uninit, 0 HEAT call, 2 COOL call, 3 idle band."), g_decision_state.call_state);
+    m_i(out, F("gootac_sa_mode"), F("Deprecated alias of gootac_call_state; will be dropped once dashboards migrate."), g_decision_state.call_state);
     m_i(out, F("gootac_comp_applied_sig"), F("Compressor gate: last applied/observed signature (0 idle, 1 cool-dir, 2 heat, 3 auto, 255 unseeded)."), g_comp_gate.sig);
     m_i(out, F("gootac_comp_decided_sig"), F("Compressor gate: signature of the current decision."), comp_sig(g_last_decision.power, g_last_decision.mode));
     m_b(out, F("gootac_comp_deferred"), F("1 while the gate is holding a decided signature change back."), g_comp_deferred);

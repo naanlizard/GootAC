@@ -17,10 +17,10 @@ extern "C" {
 #include <user_interface.h>
 }
 #include "ac_controller.h"
-#include "fs_logger.h"
+#include "ac_decision.h"
+#include "glog.h"
 #include "hk_log_bridge.h"
 #include "homekit_ac.h"
-#include <ArduinoLog.h>
 #include <ArduinoOTA.h>
 #include <ESP8266mDNS.h>
 #include <HeatPump.h>
@@ -78,63 +78,6 @@ unsigned long lastUptimeUpdate = 0;
 HeatPump hp;
 bool homekitStarted = false;
 
-// Persistent reset info tracking (values captured in setup_wifi)
-String previousResetInfo = "";
-unsigned long resetReportStart = 0;
-bool has_reset_info = false;
-
-// Logging Prefix Helper for ArduinoLog
-void printPrefix(Print *_logOutput, int level) {
-  unsigned long ms = millis();
-  time_t now = time(nullptr);
-  struct tm *timeinfo = localtime(&now);
-
-  static const char levels[] = "FEWITV";
-  char levelChar = (level >= 1 && level <= 6) ? levels[level - 1] : '?';
-
-  _logOutput->print("[");
-  // Uptime in seconds
-  _logOutput->print(ms / 1000);
-  _logOutput->print(".");
-  if (ms % 1000 < 100)
-    _logOutput->print("0");
-  if (ms % 1000 < 10)
-    _logOutput->print("0");
-  _logOutput->print(ms % 1000);
-  _logOutput->print("s");
-
-  // Real time if synced (after 2020)
-  if (now > 1577836800) {
-    char timeStr[16];
-    strftime(timeStr, sizeof(timeStr), " %H:%M:%S", timeinfo);
-    _logOutput->print(timeStr);
-  }
-  _logOutput->print("] ");
-  _logOutput->print(levelChar);
-  _logOutput->print(": ");
-}
-
-// Centralized Logger for external C libraries (like arduino-homekit-esp8266)
-extern "C" void udp_log_printf(const char *fmt, ...) {
-  char buf[256];
-  va_list args;
-  va_start(args, fmt);
-  vsnprintf_P(buf, sizeof(buf), fmt, args);
-  va_end(args);
-
-  // Clean trailing whitespace/newlines from library logs
-  size_t len = strlen(buf);
-  while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r' ||
-                     buf[len - 1] == ' ')) {
-    buf[--len] = '\0';
-  }
-
-  if (len > 0) {
-    // We already have the prefix in our log engine, so just write the message
-    Log.traceln("%s", buf);
-  }
-}
-
 // Helper to get formatted uptime string
 String getUptimeString() {
   uint32_t s = millis() / 1000;
@@ -146,6 +89,25 @@ String getUptimeString() {
   else
     snprintf(up, sizeof(up), "%ud%uh", s / 86400, (s % 86400) / 3600);
   return String(up);
+}
+
+// Streams a LittleFS file as a chunked text/plain response (empty if absent).
+static void serve_log_file(const char *path) {
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "text/plain", ""); // Start chunked response
+
+  char buf[512];
+  if (LittleFS.exists(path)) {
+    File f = LittleFS.open(path, "r");
+    while (f && f.available()) {
+      size_t n = f.read((uint8_t *)buf, sizeof(buf));
+      server.sendContent(buf, n);
+      yield();
+    }
+    if (f)
+      f.close();
+  }
+  server.sendContent(""); // End response
 }
 
 void setup_webserver() {
@@ -162,41 +124,58 @@ void setup_webserver() {
   });
 #endif
 
+  // Full durable history: every generation, oldest first.
   server.on("/log", HTTP_GET, []() {
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server.send(200, "text/plain", ""); // Start chunked response
-
-    char buf[512];
-    if (LittleFS.exists("/system.log")) {
-      File f = LittleFS.open("/system.log", "r");
+    server.send(200, "text/plain", "");
+    char path[16], buf[512];
+    for (int g = GLOG_GENERATIONS - 1; g >= 0; g--) {
+      snprintf(path, sizeof(path), "/log.%d", g);
+      if (!LittleFS.exists(path)) continue;
+      File f = LittleFS.open(path, "r");
       while (f && f.available()) {
         size_t n = f.read((uint8_t *)buf, sizeof(buf));
         server.sendContent(buf, n);
         yield();
       }
-      if (f)
-        f.close();
+      if (f) f.close();
     }
-    server.sendContent(""); // End response
+    server.sendContent("");
   });
 
-  server.on("/log.old", HTTP_GET, []() {
-    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server.send(200, "text/plain", ""); // Start chunked response
+  // Verbose RAM ring (TRACE lives only here). ?clear empties it.
+  server.on("/trace", HTTP_GET, []() {
+    const char *a, *b;
+    size_t alen, blen;
+    glog_ring_segments(&a, &alen, &b, &blen);
+    server.setContentLength(alen + blen);
+    server.send(200, "text/plain", "");
+    if (alen) server.sendContent(a, alen);
+    if (blen) server.sendContent(b, blen);
+    if (server.hasArg("clear")) glog_ring_clear();
+  });
 
-    char buf[512];
-    if (LittleFS.exists("/system.log.old")) {
-      File f = LittleFS.open("/system.log.old", "r");
-      while (f && f.available()) {
-        size_t n = f.read((uint8_t *)buf, sizeof(buf));
-        server.sendContent(buf, n);
-        yield();
+  // Runtime verbosity: GET shows the level, ?set=2..6 changes it (5 = trace).
+  // Not persisted; a reboot returns to the build default.
+  server.on("/loglevel", HTTP_GET, []() {
+    if (server.hasArg("set")) {
+      int lvl = server.arg("set").toInt();
+      if (lvl < GLOG_L_ERROR || lvl > 6) {
+        server.send(400, "application/json", "{\"error\":\"level 2..6\"}");
+        return;
       }
-      if (f)
-        f.close();
+      glog_set_level((uint8_t)lvl);
+      GLOG_INFO("SYS", "/loglevel set to %d", lvl);
     }
-    server.sendContent(""); // End response
+    char body[48];
+    snprintf(body, sizeof(body), "{\"level\":%u,\"trace\":%s}", glog_level(),
+             glog_trace_on() ? "true" : "false");
+    server.send(200, "application/json", body);
   });
+
+  // Pre-crash verbose ring, captured at the first boot after an exception/wdt
+  // reset. Overwritten by the next crash.
+  server.on("/crash", HTTP_GET, []() { serve_log_file(GLOG_CRASH_PATH); });
 
   server.on("/metrics", HTTP_GET, []() {
     server.setContentLength(CONTENT_LENGTH_UNKNOWN);
@@ -268,12 +247,21 @@ void setup_webserver() {
       v = strtof(s.c_str(), &end);
       return end == s.c_str() + s.length() && !isnan(v) && !isinf(v);
     };
-    struct CtlField { const char *name; float lo; float hi; bool integer; };
+    // set == nullptr routes to ac_controller_report_humidity instead of a
+    // characteristic setter.
+    struct CtlField {
+      const char *name; float lo; float hi; bool integer;
+      void (*set)(homekit_value_t);
+    };
     static const CtlField FIELDS[] = {
-        {"dehumidifier", 0, 1, true}, {"active", 0, 1, true},
-        {"mode", 0, 2, true},         {"heat", 16, 31, false},
-        {"cool", 16, 31, false},      {"swing", 0, 1, true},
-        {"humidity", 0, 100, false},  {"humidity_threshold", 0, 100, false},
+        {"dehumidifier", 0, 1, true, set_dehumidifier_active},
+        {"active", 0, 1, true, set_ac_active},
+        {"mode", 0, 2, true, set_ac_target_state},
+        {"heat", TEMP_CMD_MIN_C, TEMP_CMD_MAX_C, false, set_ac_heating_threshold},
+        {"cool", TEMP_CMD_MIN_C, TEMP_CMD_MAX_C, false, set_ac_cooling_threshold},
+        {"swing", 0, 1, true, set_ac_swing_mode},
+        {"humidity", 0, 100, false, nullptr},
+        {"humidity_threshold", 0, 100, false, set_dehumidifier_threshold},
     };
     constexpr int NFIELD = sizeof(FIELDS) / sizeof(FIELDS[0]);
     float vals[NFIELD];
@@ -299,10 +287,10 @@ void setup_webserver() {
     GLOG_INFO("SYS", "/control applying %d field(s)", nset);
     for (int i = 0; i < NFIELD; i++) {
       if (!has[i]) continue;
-      // Not a HomeKit characteristic write: it has no setter and must not go
-      // through update_state()'s debounce, or a humidity push would re-command
-      // the AC every two minutes.
-      if (strcmp(FIELDS[i].name, "humidity") == 0) {
+      // Not a HomeKit characteristic write: it must not go through
+      // update_state()'s debounce, or a humidity push would re-command the AC
+      // every two minutes.
+      if (!FIELDS[i].set) {
         ac_controller_report_humidity(vals[i]);
         continue;
       }
@@ -315,15 +303,7 @@ void setup_webserver() {
         v.format = homekit_format_float;
         v.float_value = vals[i];
       }
-      switch (i) {
-        case 0: set_dehumidifier_active(v); break;
-        case 1: set_ac_active(v); break;
-        case 2: set_ac_target_state(v); break;
-        case 3: set_ac_heating_threshold(v); break;
-        case 4: set_ac_cooling_threshold(v); break;
-        case 5: set_ac_swing_mode(v); break;
-        case 7: set_dehumidifier_threshold(v); break;
-      }
+      FIELDS[i].set(v);
     }
     // Echo the resulting target mirrors so guard-dropped writes are visible.
     char hBuf[10], cBuf[10], tBuf[10], body[192];
@@ -378,10 +358,9 @@ void setup_wifi() {
   // Capture reset info before WiFi clears anything
   String reason = ESP.getResetReason();
   if (reason.indexOf("Exception") != -1 || reason.indexOf("Watchdog") != -1) {
-    previousResetInfo =
-        "PREVIOUS CRASH: " + reason + " | " + ESP.getResetInfo();
-    has_reset_info = true;
-    resetReportStart = millis();
+    GLOG_ERROR("SYS", "PREVIOUS CRASH: %s | %s%s", reason.c_str(),
+               ESP.getResetInfo().c_str(),
+               glog_crash_captured() ? " (pre-crash trace at /crash)" : "");
   }
 
   WiFi.hostname(hostName);
@@ -412,21 +391,11 @@ void setup_ota() {
   // NOTE: mDNS TXT values MUST stay in scope or be copied by the library.
   // We use the 60s loop to update dynamic values safely.
   MDNS.addServiceTxt("arduino", "tcp", "rssi", "0");
-  MDNS.addServiceTxt(
-      "arduino", "tcp", "sdk",
-      "v1.0"); // Static for now to avoid SDK string lifetime issues
 }
 
 void setup() {
   LittleFS.begin();
-  fsLogger.rotate();
-  // Initialize logging without the level prefix (the prefix callback will
-  // handle it)
-#ifndef APP_LOG_LEVEL
-#define APP_LOG_LEVEL LOG_LEVEL_VERBOSE
-#endif
-  Log.begin(APP_LOG_LEVEL, &fsLogger, false);
-  Log.setPrefix(printPrefix);
+  glog_init();
 
   // Set up SNTP for real-time logs
   configTime(1 * 3600, 0, "pool.ntp.org", "time.nist.gov");
@@ -454,7 +423,6 @@ void setup() {
   setup_ota();
   setup_webserver();
 
-  GLOG_BOOT("GootAC Booting...");
   GLOG_BOOT("Reset reason: %s", ESP.getResetReason().c_str());
   GLOG_BOOT("IP: %s", WiFi.localIP().toString().c_str());
 
@@ -533,14 +501,5 @@ void loop() {
     }
   } else {
     ac_controller_loop();
-
-    // Every 60 seconds, report previous crash for 24h visibility
-    static unsigned long lastResetReport = 0;
-    if (has_reset_info && (millis() - resetReportStart < 86400000UL)) {
-      if (millis() - lastResetReport > 60000) {
-        GLOG_ERROR("SYS", "PERSISTENT CRASH INFO: %s", previousResetInfo.c_str());
-        lastResetReport = millis();
-      }
-    }
   }
 }
