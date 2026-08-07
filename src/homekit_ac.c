@@ -115,5 +115,5 @@ homekit_server_config_t config = {
     // /accessories only when the number rises. Pairings survive a bump.
     // Only ever increase it: paired controllers have cached every value
     // shipped OR canaried up to the current one.
-    .config_number = 10
+    .config_number = 11
 };
