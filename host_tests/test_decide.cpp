@@ -65,6 +65,16 @@ static DecisionInput mkin(bool active, uint8_t mode, float heat, float cool,
   return in;
 }
 
+// mkin plus the humidity latch inputs (threshold defaults to 55 via NSDMI).
+static DecisionInput mkin_h(bool active, uint8_t mode, float heat, float cool,
+                            bool dehum, float room, uint32_t now, float hum,
+                            float hthr = 55.0f) {
+  DecisionInput in = mkin(active, mode, heat, cool, dehum, room, now);
+  in.humidity_pct = hum;
+  in.humidity_threshold = hthr;
+  return in;
+}
+
 // ---------------------------------------------------------------------------
 // Reference for the oracle sweep. The explicit HEAT/COOL thermal decision is a
 // parallel implementation of the one-sided call cycle, written from the spec;
@@ -80,8 +90,10 @@ static DecisionInput mkin(bool active, uint8_t mode, float heat, float cool,
 static void decide_reference(bool target_active, uint8_t hk_target_mode,
                              float heatThr, float coolThr, bool dehumidify,
                              float roomTemp, uint32_t now_ms_in,
+                             float humidity, float humidity_thr,
                              int8_t &call_state, uint8_t &last_fan_idx,
-                             uint32_t &lower_since, bool &out_power,
+                             uint32_t &lower_since, bool &dry_latched,
+                             bool &out_power,
                              uint8_t &out_mode, float &out_temp,
                              uint8_t &out_fan, float &out_delta,
                              const DecisionOutput *live) {
@@ -89,8 +101,13 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
   uint8_t hpMode = 0; // Library Index: 0:HEAT, 1:DRY, 2:COOL, 3:FAN, 4:AUTO
   float hpTemp = 21.0;
 
+  // Humidity latch, mirrored from the spec: same-tick, NaN-safe unknown test.
+  if (!(humidity > 0.0f)) dry_latched = false;
+  else if (humidity > humidity_thr) dry_latched = true;
+  else if (humidity < humidity_thr - 5.0f) dry_latched = false;
+
   // Decision Logic
-  if (dehumidify && !target_active) {
+  if (dehumidify && dry_latched && !target_active) {
     hpPower = true; hpMode = 1; // standalone DRY
   } else if (target_active) {
     if (hk_target_mode == 1) { // HEAT: one-sided call cycle
@@ -98,7 +115,9 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
         const float ht = heat_call_target(heatThr, coolThr);
         if (call_state == 0) { if (roomTemp >= ht) call_state = 3; }
         else call_state = (roomTemp < heatThr) ? 0 : 3;
-        hpPower = true; hpMode = (call_state == 0) ? 0 : (dehumidify ? 1 : 3);
+        hpPower = true;
+        hpMode = (call_state == 0) ? 0
+               : ((dehumidify && dry_latched && last_fan_idx == 1) ? 1 : 3);
         hpTemp = ht;
       } else { hpPower = true; hpMode = 0; hpTemp = heatThr; }
     } else if (hk_target_mode == 2) { // COOL: one-sided call cycle
@@ -106,7 +125,9 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
         const float ct = cool_call_target(heatThr, coolThr);
         if (call_state == 2) { if (roomTemp <= ct) call_state = 3; }
         else call_state = (roomTemp > coolThr) ? 2 : 3;
-        hpPower = true; hpMode = (call_state == 2) ? 2 : (dehumidify ? 1 : 3);
+        hpPower = true;
+        hpMode = (call_state == 2) ? 2
+               : ((dehumidify && dry_latched && last_fan_idx == 1) ? 1 : 3);
         hpTemp = ct;
       } else { hpPower = true; hpMode = 2; hpTemp = coolThr; }
     } else if (hk_target_mode == 0 && live) {
@@ -121,9 +142,11 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
   {
     bool room_known = (roomTemp > 1.0f);
     uint32_t now_ms = now_ms_in;
-    if (hpPower && room_known && (hpMode == 2 || hpMode == 0 || hpMode == 3)) {
+    if (hpPower && room_known &&
+        (hpMode == 2 || hpMode == 0 || hpMode == 3 ||
+         (hpMode == 1 && target_active))) {
       float delta;
-      if (hpMode == 3) {
+      if (hpMode == 3 || hpMode == 1) {
         const float dc = roomTemp - cool_call_target(heatThr, coolThr);
         const float dh = heat_call_target(heatThr, coolThr) - roomTemp;
         delta = (hk_target_mode == 2) ? dc
@@ -141,7 +164,7 @@ static void decide_reference(bool target_active, uint8_t hk_target_mode,
       } else {
         lower_since = 0;
       }
-      fan_idx = last_fan_idx;
+      fan_idx = (hpMode == 1) ? 0 : last_fan_idx;
       g_control_delta_c = delta;
     } else {
       fan_idx = 0; last_fan_idx = 0; lower_since = 0; g_control_delta_c = 0.0f;
@@ -205,13 +228,19 @@ static void group_b_edge_cases() {
     DecisionOutput o = ac_decide(mkin(true, 0, 18, 30, false, 5.0f, 1000), st);
     CHECK(o.power); CHECK_EQI(o.mode, 0); CHECK_EQI(o.fan_idx, 5);
   }
-  // DRY wins over active==0; setpoint default 21.0; fan delegates.
+  // Standalone DRY needs the latch: humid arms it same-tick, unknown keeps
+  // the unit off. Setpoint default 21.0; fan delegates.
+  {
+    DecisionState st;
+    DecisionOutput o = ac_decide(mkin_h(false, 0, 18, 30, true, 26.0f, 1000, 65.0f), st);
+    CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQF(o.temp, 21.0f);
+    CHECK_EQI(o.fan_idx, 0); CHECK_EQF(o.control_delta_c, 0.0f);
+    CHECK_EQI(st.last_fan_idx, 0); CHECK(st.dry_latched);
+  }
   {
     DecisionState st;
     DecisionOutput o = ac_decide(mkin(false, 0, 18, 30, true, 26.0f, 1000), st);
-    CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQF(o.temp, 21.0f);
-    CHECK_EQI(o.fan_idx, 0); CHECK_EQF(o.control_delta_c, 0.0f);
-    CHECK_EQI(st.last_fan_idx, 0);
+    CHECK(!o.power); CHECK(!st.dry_latched);
   }
   // Target off: power false, mode 0, temp default; fan memory resets
   // but Smart-Auto direction memory is retained.
@@ -401,10 +430,15 @@ static void group_e_oracle_sweep() {
   const uint32_t times[][2] = {{0, 1000}, {5000, 64999}, {5000, 65000}, {5000, 70000}};
   long cases = 0, mismatches = 0;
 
-  // The reference mirrors dehumidify semantics, so deh is swept too. tm 0 is
-  // swept only through the fan block; see the decide_reference note.
+  // The reference mirrors dehumidify semantics, so deh is swept too, along
+  // with humidity (0 unknown / 52 hold-band / 65 arming, thr 55) and the
+  // latch pre-state. tm 0 is swept only through the fan block; see the
+  // decide_reference note.
+  const float hums[] = {0.0f, 52.0f, 65.0f};
   for (int act = 0; act <= 1; act++)
    for (int deh = 0; deh <= 1; deh++)
+    for (unsigned hi = 0; hi < 3; hi++)
+    for (int dl = 0; dl <= 1; dl++)
     for (uint8_t tm = 0; tm <= 2; tm++)
      for (int ri = 0; ri < 5 + 81; ri++) {
        float room = ri < 5 ? rooms_fixed[ri] : 15.0f + 0.25f * (ri - 5);
@@ -412,37 +446,42 @@ static void group_e_oracle_sweep() {
         for (unsigned si = 0; si < 4; si++)
          for (unsigned fi = 0; fi < 4; fi++)
           for (unsigned ti = 0; ti < 4; ti++) {
-            DecisionInput in = mkin(act, tm, thr[th][0], thr[th][1], deh,
-                                    room, times[ti][1]);
+            DecisionInput in = mkin_h(act, tm, thr[th][0], thr[th][1], deh,
+                                      room, times[ti][1], hums[hi]);
             DecisionState st_new;
             st_new.call_state = sas[si];
             st_new.last_fan_idx = fans[fi];
             st_new.lower_since = times[ti][0];
+            st_new.dry_latched = dl;
 
             DecisionOutput o = ac_decide(in, st_new);
 
             int8_t r_sa = sas[si];
             uint8_t r_fan = fans[fi];
             uint32_t r_low = times[ti][0];
+            bool r_latch = dl;
             bool r_pow; uint8_t r_mode; float r_temp; uint8_t r_fidx; float r_delta;
             decide_reference(act, tm, thr[th][0], thr[th][1], deh, room,
-                             times[ti][1], r_sa, r_fan, r_low, r_pow, r_mode,
+                             times[ti][1], hums[hi], 55.0f,
+                             r_sa, r_fan, r_low, r_latch, r_pow, r_mode,
                              r_temp, r_fidx, r_delta, &o);
 
             // Under Smart Auto the reference adopts the live power/mode/temp, so
-            // those three and call_state carry no information; the ramp outputs do.
+            // those three and call_state carry no information; the ramp outputs
+            // and the latch do.
             const bool auto_case = (act && tm == 0);
             cases++;
             bool ok = o.fan_idx == r_fidx && o.control_delta_c == r_delta &&
                       st_new.last_fan_idx == r_fan && st_new.lower_since == r_low &&
+                      st_new.dry_latched == r_latch &&
                       (auto_case || (o.power == r_pow && o.mode == r_mode &&
                                      o.temp == r_temp && st_new.call_state == r_sa));
             if (!ok && mismatches++ < 5)
-              printf("FAIL oracle: act=%d deh=%d tm=%u room=%.4f thr=(%.1f,%.1f) "
-                     "sa=%d fan=%u low=%u now=%u\n",
-                     act, deh, tm, (double)room, (double)thr[th][0],
-                     (double)thr[th][1], sas[si], fans[fi], times[ti][0],
-                     times[ti][1]);
+              printf("FAIL oracle: act=%d deh=%d hum=%.0f dl=%d tm=%u room=%.4f "
+                     "thr=(%.1f,%.1f) sa=%d fan=%u low=%u now=%u\n",
+                     act, deh, (double)hums[hi], dl, tm, (double)room,
+                     (double)thr[th][0], (double)thr[th][1], sas[si], fans[fi],
+                     times[ti][0], times[ti][1]);
           }
      }
   g_checks++;
@@ -478,71 +517,163 @@ static void group_f_determinism() {
 // Group G - dehumidify as an idle-band toggle. DRY replaces the idle band in
 // every target mode with no floor, so it covers the whole band and may cool
 // the room into a HEAT call, and still runs standalone when the accessory is off.
-static DecisionOutput dec1(bool active, uint8_t mode, float heat, float cool,
-                           bool dehum, float room, int8_t sa_in = 3) {
-  DecisionState st;
-  st.call_state = sa_in;
-  DecisionInput in = mkin(active, mode, heat, cool, dehum, room, 10000);
-  return ac_decide(in, st);
-}
-
 static void group_g_dehumidify_toggle() {
-  // Off plus armed keeps standalone dehumidification, fan left to the unit.
-  DecisionOutput o = dec1(false, 0, 18, 24, true, 22.0f);
-  CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
-  o = dec1(false, 0, 18, 24, false, 22.0f);
-  CHECK(!o.power);
+  // Standalone (accessory off): DRY only while latched; off when the reading
+  // is under the release point or missing entirely.
+  {
+    DecisionState st;
+    DecisionOutput o = ac_decide(mkin_h(false, 0, 18, 24, true, 22.0f, 10000, 65.0f), st);
+    CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
+    o = ac_decide(mkin_h(false, 0, 18, 24, true, 22.0f, 10000, 45.0f), st);
+    CHECK(!o.power);
+  }
+  {
+    DecisionState st;
+    DecisionOutput o = ac_decide(mkin(false, 0, 18, 24, true, 22.0f, 10000), st);
+    CHECK(!o.power);
+    o = ac_decide(mkin(false, 0, 18, 24, false, 22.0f, 10000), st);
+    CHECK(!o.power);
+  }
 
-  // Smart-Auto idle band, cooling side: DRY replaces FAN.
-  o = dec1(true, 0, 18, 24, true, 22.0f);
-  CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
-  o = dec1(true, 0, 18, 24, false, 22.0f);
-  CHECK_EQI(o.mode, 3); CHECK_EQI(o.fan_idx, 1);   // idle, 1.5 past cool target
-
-  // DRY has no floor: it covers the idle band all the way to the heat end.
-  for (float room = 18.0f; room <= 23.0f; room += 0.5f) {
-    o = dec1(true, 0, 18, 24, true, room);
-    CHECK_EQI(o.mode, 1);
-    o = dec1(true, 0, 18, 24, false, room);
+  // Idle band: DRY needs latch AND last tick's rung at QUIET. Rung above
+  // QUIET stays FAN however humid it is.
+  {
+    DecisionState st; st.call_state = 3; st.last_fan_idx = 1;
+    DecisionOutput o = ac_decide(mkin_h(true, 0, 18, 24, true, 22.0f, 10000, 65.0f), st);
+    CHECK(o.power); CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
+  }
+  {
+    DecisionState st; st.call_state = 3; st.last_fan_idx = 3;
+    DecisionOutput o = ac_decide(mkin_h(true, 0, 18, 24, true, 22.0f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 3);
+  }
+  {
+    DecisionState st; st.call_state = 3; st.last_fan_idx = 1;
+    DecisionOutput o = ac_decide(mkin_h(true, 0, 18, 24, true, 22.0f, 10000, 45.0f), st);
     CHECK_EQI(o.mode, 3);
   }
 
-  // A running call is never displaced by the toggle; explicit-mode idle bands
-  // run DRY exactly like Smart Auto's.
-  o = dec1(true, 0, 18, 24, true, 25.0f, 2);
-  CHECK_EQI(o.mode, 2);
-  o = dec1(true, 0, 18, 24, true, 17.0f, 0);
-  CHECK_EQI(o.mode, 0);
-  o = dec1(true, 1, 18, 24, true, 17.0f);   // explicit HEAT, in a call
-  CHECK_EQI(o.mode, 0);
-  o = dec1(true, 2, 18, 24, true, 25.0f);   // explicit COOL, in a call
-  CHECK_EQI(o.mode, 2);
-  o = dec1(true, 1, 18, 24, true, 22.0f);   // explicit HEAT, idling
-  CHECK_EQI(o.mode, 1);
-  o = dec1(true, 2, 18, 24, true, 22.0f);   // explicit COOL, idling
-  CHECK_EQI(o.mode, 1);
+  // First tick from a reset rung (0) is FAN even latched-deep: the mode reads
+  // the prior rung, the fan block then adopts QUIET, and DRY lands next tick.
+  {
+    DecisionState st; st.call_state = 3;
+    DecisionInput in = mkin_h(true, 0, 18, 24, true, 21.5f, 10000, 65.0f);
+    DecisionOutput o = ac_decide(in, st);
+    CHECK_EQI(o.mode, 3); CHECK_EQI(st.last_fan_idx, 1);
+    o = ac_decide(in, st);
+    CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);
+  }
+
+  // Exit on demand: in DRY the staircase keeps tracking, so a room jumping
+  // back to the target raises the rung immediately and FAN returns next tick
+  // at that rung (no re-walk from QUIET).
+  {
+    DecisionState st; st.call_state = 3; st.last_fan_idx = 1;
+    DecisionOutput o = ac_decide(mkin_h(true, 0, 18, 24, true, 23.5f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 1); CHECK_EQI(o.fan_idx, 0);   // still DRY this tick
+    CHECK_EQI(st.last_fan_idx, 4);                   // rung already up (depth 0)
+    o = ac_decide(mkin_h(true, 0, 18, 24, true, 23.5f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 3); CHECK_EQI(o.fan_idx, 4);
+  }
+
+  // A running call is never displaced by the toggle, however humid.
+  {
+    DecisionState st; st.call_state = 2; st.last_fan_idx = 1;
+    DecisionOutput o = ac_decide(mkin_h(true, 0, 18, 24, true, 25.0f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 2);
+  }
+  {
+    DecisionState st; st.call_state = 0; st.last_fan_idx = 1;
+    DecisionOutput o = ac_decide(mkin_h(true, 0, 18, 24, true, 17.0f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 0);
+  }
+
+  // Explicit-mode idle bands gate exactly like Smart Auto's.
+  {
+    DecisionState st; st.call_state = 3; st.last_fan_idx = 1;
+    DecisionOutput o = ac_decide(mkin_h(true, 2, 18, 24, true, 22.0f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 1);
+  }
+  {
+    DecisionState st; st.call_state = 3; st.last_fan_idx = 1;
+    DecisionOutput o = ac_decide(mkin_h(true, 1, 18, 24, true, 22.0f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 1);
+  }
 
   // Room unknown has no idle band to gate on, so native AUTO stands.
-  o = dec1(true, 0, 18, 24, true, 0.5f);
-  CHECK_EQI(o.mode, 4);
-
-  // Descending sweep, armed: COOL down to the release point, then DRY for the
-  // whole idle band, then HEAT. DRY handing over to HEAT is intended, since
-  // dehumidifying cools; the sweep pins the order, not the absence of a cycle.
-  DecisionState st; st.call_state = 2;
-  int seen[5] = {0, 0, 0, 0, 0};
-  int last = -1, order[8], n = 0;
-  for (float room = 25.0f; room >= 17.0f; room -= 0.5f) {
-    DecisionInput in = mkin(true, 0, 18, 24, true, room, 10000);
-    DecisionOutput s = ac_decide(in, st);
-    seen[s.mode]++;
-    if (s.mode != last && n < 8) { order[n++] = s.mode; last = s.mode; }
+  {
+    DecisionState st;
+    DecisionOutput o = ac_decide(mkin_h(true, 0, 18, 24, true, 0.5f, 10000, 65.0f), st);
+    CHECK_EQI(o.mode, 4);
   }
-  CHECK_EQI(n, 3);
-  CHECK_EQI(order[0], 2);  // COOL
-  CHECK_EQI(order[1], 1);  // DRY across the idle band
-  CHECK_EQI(order[2], 0);  // HEAT
-  CHECK_EQI(seen[3], 0);   // never FAN while armed
+
+  // Descending sweep, armed + humid, time advancing past the step-down dwell:
+  // COOL to the release, FAN while the staircase walks down, DRY once it
+  // reaches QUIET, FAN again as the heat side raises demand, then a HEAT
+  // call. Pins that DRY sits strictly inside the quiet middle of the band.
+  {
+    DecisionState st; st.call_state = 2;
+    int seen[5] = {0, 0, 0, 0, 0};
+    int last = -1, order[8], n = 0;
+    uint32_t now = 10000;
+    for (float room = 25.0f; room >= 17.0f; room -= 0.5f) {
+      now += 70000;   // > FAN_STEP_DOWN_MS: each tick may step down one rung
+      DecisionOutput s = ac_decide(mkin_h(true, 0, 18, 24, true, room, now, 65.0f), st);
+      seen[s.mode]++;
+      if (s.mode != last && n < 8) { order[n++] = s.mode; last = s.mode; }
+    }
+    CHECK_EQI(n, 5);
+    CHECK_EQI(order[0], 2);  // COOL call
+    CHECK_EQI(order[1], 3);  // FAN: staircase walking down
+    CHECK_EQI(order[2], 1);  // DRY at QUIET
+    CHECK_EQI(order[3], 3);  // FAN: heat side re-raises demand
+    CHECK_EQI(order[4], 0);  // HEAT call
+    CHECK(seen[1] > 0); CHECK(seen[3] > 0);
+  }
+
+  // Unarmed regression: the same sweep without the toggle never produces DRY.
+  {
+    DecisionState st; st.call_state = 2;
+    uint32_t now = 10000;
+    for (float room = 25.0f; room >= 17.0f; room -= 0.5f) {
+      now += 70000;
+      DecisionOutput s = ac_decide(mkin_h(true, 0, 18, 24, false, room, now, 65.0f), st);
+      CHECK(s.mode != 1);
+    }
+  }
+}
+
+// Latch mechanics in isolation, observed through the standalone path where the
+// latch alone decides power.
+static void group_n_humidity_latch() {
+  DecisionState st;
+  DecisionInput in = mkin_h(false, 0, 18, 24, true, 22.0f, 10000, 0.0f);
+
+  auto tick = [&](float hum) {
+    in.humidity_pct = hum;
+    return ac_decide(in, st);
+  };
+
+  CHECK(!tick(0.0f).power);          // unknown: off
+  CHECK(!tick(54.9f).power);         // under threshold, never armed: off
+  CHECK(tick(55.5f).power);          // over threshold: arms same tick
+  CHECK(tick(51.0f).power);          // hold band (50..55): stays armed
+  CHECK(tick(50.1f).power);          // still inside the band
+  CHECK(!tick(49.9f).power);         // under threshold-5: releases
+  CHECK(!tick(52.0f).power);         // hold band while unarmed stays unarmed
+  CHECK(tick(56.0f).power);          // re-arms
+  CHECK(!tick(0.0f).power);          // reading lost: forced off
+  CHECK(!tick(-2.0f).power);         // negative sentinel: off
+  CHECK(tick(56.0f).power);
+  CHECK(!tick(nanf("")).power);      // NaN must force off, not hold
+  CHECK(!st.dry_latched);
+
+  // Non-default threshold plumbs through.
+  in.humidity_threshold = 70.0f;
+  CHECK(!tick(65.0f).power);
+  CHECK(tick(71.0f).power);
+  CHECK(tick(66.0f).power);          // 65..70 is the new hold band
+  CHECK(!tick(64.9f).power);
 }
 
 // Group H - where calls drive the room, by range width. Every expected value
@@ -941,6 +1072,7 @@ int main() {
   group_k_normalize();
   group_l_fan_dither();
   group_m_comp_gate();
+  group_n_humidity_latch();
   printf("%d checks, %d failures\n", g_checks, g_fails);
   return g_fails ? 1 : 0;
 }

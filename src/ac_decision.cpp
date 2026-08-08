@@ -67,6 +67,15 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
   out.fan_idx = 0;
   out.control_delta_c = 0.0f;
 
+  // Humidity latch, same-tick. `!(x > 0)` is deliberate: it also catches NaN,
+  // which would otherwise fall through to "hold" and freeze a stale latch.
+  if (!(in.humidity_pct > 0.0f))
+    state.dry_latched = false;
+  else if (in.humidity_pct > in.humidity_threshold)
+    state.dry_latched = true;
+  else if (in.humidity_pct < in.humidity_threshold - HUMIDITY_LATCH_HYST_PCT)
+    state.dry_latched = false;
+
   // One call-cycle state machine for every target mode: Smart Auto runs both
   // sides, explicit HEAT/COOL run the same machine with the other side disabled.
   if (in.active) {
@@ -89,12 +98,15 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
                            : (cool_en && in.room_temp > in.cool_threshold) ? CALL_COOL
                            : CALL_IDLE;
         }
-        // DRY covers the whole idle band with no floor, so it may cool the room
+        // Idle-band DRY needs the latch AND last tick's rung already at QUIET,
+        // so DRY only ever replaces a quiet fan. DRY may still cool the room
         // into a HEAT call; that hands back once satisfied and is intended.
+        const bool dry_ok = in.dehumidify && state.dry_latched &&
+                            state.last_fan_idx == FAN_IDX_MIN;
         out.power = true;
         out.mode  = (state.call_state == CALL_HEAT) ? MODE_IDX_HEAT
                   : (state.call_state == CALL_COOL) ? MODE_IDX_COOL
-                  : (in.dehumidify ? MODE_IDX_DRY : MODE_IDX_FAN);
+                  : (dry_ok ? MODE_IDX_DRY : MODE_IDX_FAN);
         out.temp  = (state.call_state == CALL_HEAT || !cool_en)
                         ? heat_target
                         : cool_target; // ignored when mode is FAN or DRY
@@ -107,7 +119,7 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
         out.power = true; out.mode = MODE_IDX_AUTO; // native AUTO
       }
     }
-  } else if (in.dehumidify) {
+  } else if (in.dehumidify && state.dry_latched) {
     out.power = true; out.mode = MODE_IDX_DRY; // standalone DRY while the accessory is off
   }
 
@@ -116,7 +128,11 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
     bool room_known = (in.room_temp > 1.0f);
     bool call = out.power && room_known &&
                 (out.mode == MODE_IDX_COOL || out.mode == MODE_IDX_HEAT);
-    bool idle_fan = out.power && room_known && out.mode == MODE_IDX_FAN;
+    // Idle-band DRY keeps the staircase bookkeeping running (its rung is the
+    // DRY exit condition); standalone DRY (in.active false) stays delegated.
+    bool idle_fan = out.power && room_known &&
+                    (out.mode == MODE_IDX_FAN ||
+                     (out.mode == MODE_IDX_DRY && in.active));
     if (call || idle_fan) {
       float delta;
       if (call) {
@@ -142,7 +158,8 @@ DecisionOutput ac_decide(const DecisionInput& in, DecisionState& state) {
       } else {
         state.lower_since = 0;
       }
-      out.fan_idx = state.last_fan_idx;
+      // DRY always delegates the fan to the unit; the rung tracks underneath.
+      out.fan_idx = (out.mode == MODE_IDX_DRY) ? 0 : state.last_fan_idx;
       out.control_delta_c = delta;
     } else {
       out.fan_idx = 0; state.last_fan_idx = 0; state.lower_since = 0; out.control_delta_c = 0.0f;

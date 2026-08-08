@@ -9,7 +9,7 @@ GootAC is a firmware for the ESP8266 (built for the Wemos D1 Mini v4 that I pers
 - **Native HomeKit Integration**: Pair directly with the Apple Home app.
 - **Multifunction Interface**:
     - **HeaterCooler Service**: Heat, Cool, and Smart Auto modes with heating/cooling threshold sliders and Swing Mode; fan speed is driven by the firmware.
-    - **Dehumidifier Service**: Dedicated toggle for the unit's Dry (Dehumidify) mode.
+    - **Dehumidifier Service**: Toggle that arms drying; the unit runs Dry only while reported humidity exceeds the target slider.
 - **Embedded Diagnostics**: Flash-persistent system logs stored on-device and served via HTTP.
 - **OTA Updates**: Wireless firmware deployment via ArduinoOTA.
 

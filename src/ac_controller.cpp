@@ -161,6 +161,7 @@ static bool try_migrate_legacy_v12(File &f) {
   currentState.heating_threshold = legacy.heating_threshold;
   currentState.swing_mode = legacy.swing_mode;
   currentState.dehumidifier = legacy.dehumidifier;
+  currentState.humidity_threshold = HUMIDITY_THRESHOLD_DEFAULT;
   sanitize_loaded_thresholds();   // legacy admits 10-40C, unordered
   log_target_state("Migrated v1.12 -> v1.13 target state");
   save_target_state();
@@ -223,6 +224,11 @@ void load_target_state() {
         checksum_bytes(&loaded, sizeof(TargetState)) == loaded.checksum) {
       currentState = loaded;
       log_target_state("Target State loaded successfully");
+      // The humidity latch reads this without a setter in the path; out-of-range
+      // restored values would arm it permanently. Before sanitize, which saves.
+      if (!(currentState.humidity_threshold >= *cha_dehumidifier_threshold.min_value &&
+            currentState.humidity_threshold <= *cha_dehumidifier_threshold.max_value))
+        currentState.humidity_threshold = HUMIDITY_THRESHOLD_DEFAULT;
       sanitize_loaded_thresholds();
       return;
     }
@@ -393,8 +399,8 @@ void set_dehumidifier_threshold(homekit_value_t value) {
   char buf[10];
   dtostrf(pct, 1, 0, buf);
   HKLOG_INFO("Characteristic Set Dehumidifier Threshold -> %s%%", buf);
-  // Persist directly: no decision input changes, so update_state() would only
-  // re-command the AC for a value nothing reads yet.
+  // Persist directly: the latch reads this on the next decide tick anyway, so
+  // update_state()'s immediate re-command adds nothing.
   save_target_state();
 }
 
@@ -460,6 +466,11 @@ void update_physical_ac() {
   din.dehumidify = (currentState.dehumidifier == 1);
   din.room_temp = hp->getRoomTemperature();
   din.now_ms = millis();
+  // humidity_fresh leaves the out-param untouched when stale; 0 = unknown.
+  float hum = 0.0f;
+  ac_controller_humidity_fresh(hum);
+  din.humidity_pct = hum;
+  din.humidity_threshold = currentState.humidity_threshold;
 
   const DecisionOutput dout = ac_decide(din, g_decision_state);
   g_last_decision = dout;
@@ -499,8 +510,8 @@ void update_physical_ac() {
     char tempBuf[10];
 
     if (!din.active) {
-      strncpy_P(rationale, din.dehumidify ? PSTR("Logic: Target OFF, dehumidifying")
-                                          : PSTR("Logic: Target OFF"), sizeof(rationale)-1);
+      strncpy_P(rationale, dout.power ? PSTR("Logic: Target OFF, dehumidifying")
+                                      : PSTR("Logic: Target OFF"), sizeof(rationale)-1);
     } else if (din.target_mode == 1) { // HEAT
       dtostrf(hpTemp, 1, 1, tempBuf);
       snprintf_P(rationale, sizeof(rationale),
@@ -829,8 +840,9 @@ void ac_controller_write_metrics(Print& out) {
     m_b(out, F("gootac_swing_mode"),    F("1 if vane swing is enabled, else 0."),                      currentState.swing_mode != 0);
     m_u(out, F("gootac_actual_fan_speed"), F("Actual fan-speed index reported by the AC."), st.actualFanSpeed);
     m_i(out, F("gootac_fan_target_index"), F("GootAC-commanded fan index into FAN_MAP (0=AUTO, 1=QUIET, 2/3/4/5=25/50/75/100%); NOT the same scale as gootac_actual_fan_speed."), g_last_decision.fan_idx);
-    m_f(out, F("gootac_control_delta_celsius"), F("Fan-driving delta: >0 short of the commanded target, <=0 depth past it (idle band: vs its anchor target); 0 when the fan is delegated."), g_last_decision.control_delta_c);
+    m_f(out, F("gootac_control_delta_celsius"), F("Fan-driving delta: >0 short of the commanded target, <=0 depth past it (idle band: vs its anchor target); 0 when no staircase is running."), g_last_decision.control_delta_c);
     m_b(out, F("gootac_dehumidifier_active"), F("1 if the HomeKit dehumidifier service is targeted on, else 0."), currentState.dehumidifier != 0);
+    m_b(out, F("gootac_dry_latched"), F("1 if the humidity latch is armed (over threshold, held until threshold-5)."), g_decision_state.dry_latched);
     m_b(out, F("gootac_decided_power"), F("Last decision: 1 if the unit should be powered on."), g_last_decision.power);
     m_i(out, F("gootac_decided_mode_index"), F("Last decision: MODE_MAP index (0 HEAT,1 DRY,2 COOL,3 FAN,4 AUTO); meaningful only when decided power=1."), g_last_decision.mode);
     m_f(out, F("gootac_decided_temp_celsius"), F("Last decision: setpoint in Celsius; not commanded when mode index is 3 or 1."), g_last_decision.temp);
@@ -851,7 +863,7 @@ void ac_controller_write_metrics(Print& out) {
       m_b(out, F("gootac_humidity_fresh"), F("1 if an external humidity reading arrived within the staleness window."), fresh);
       m_f(out, F("gootac_humidity_percent"), F("Externally reported indoor relative humidity; meaningless unless gootac_humidity_fresh is 1."), g_humidity_seen ? g_humidity_pct : 0.0f);
       m_u(out, F("gootac_humidity_age_seconds"), F("Seconds since the last external humidity report; 0 if none has ever arrived."), g_humidity_seen ? (uint32_t)((millis() - g_humidity_at) / 1000UL) : 0UL);
-      m_f(out, F("gootac_humidity_threshold_percent"), F("Target relative humidity set via HomeKit; nothing consumes it yet."), currentState.humidity_threshold);
+      m_f(out, F("gootac_humidity_threshold_percent"), F("Target relative humidity set via HomeKit; arms the DRY latch when exceeded."), currentState.humidity_threshold);
       m_b(out, F("gootac_humidity_slider_exposed"), F("1 if this unit publishes the HomeKit target-humidity slider (DEVICE_NAME in HUMIDITY_UNITS)."), device_has_humidity_feed());
     }
 

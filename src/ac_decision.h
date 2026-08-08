@@ -47,6 +47,10 @@ enum : uint8_t { HK_TARGET_AUTO = 0, HK_TARGET_HEAT = 1, HK_TARGET_COOL = 2 };
 bool normalize_thresholds(float &heat, float &cool, float lo, float hi,
                           ThresholdAuthority who);
 
+// Latch release margin: arm above the threshold, release only this far under,
+// so readings dithering at the slider value cannot flap the mode register.
+constexpr float HUMIDITY_LATCH_HYST_PCT = 5.0f;
+
 struct DecisionInput {
   bool     active;          // currentState.active == 1
   uint8_t  target_mode;     // HomeKit TargetHeaterCoolerState: 0 AUTO, 1 HEAT, 2 COOL
@@ -55,6 +59,8 @@ struct DecisionInput {
   bool     dehumidify;      // currentState.dehumidifier == 1
   float    room_temp;       // <= 1.0 means unknown
   uint32_t now_ms;          // caller passes millis(); uint32_t matches ESP8266 wrap
+  float    humidity_pct = 0.0f;        // <= 0 (or NaN) means unknown/stale
+  float    humidity_threshold = 55.0f; // currentState.humidity_threshold
 };
 
 // Call-cycle state, every target mode. Values frozen: gootac_sa_mode /
@@ -66,6 +72,7 @@ struct DecisionState {
   int8_t   call_state   = CALL_UNINIT;
   uint8_t  last_fan_idx = 0;  // FAN_MAP index of the last commanded fan level
   uint32_t lower_since  = 0;  // 0 = no step-down pending
+  bool     dry_latched  = false;  // humidity over threshold; drying wanted
 };
 
 // When power == false, mode/temp are don't-cares; the caller's `if (hpPower)`

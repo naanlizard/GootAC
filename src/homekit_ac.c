@@ -38,8 +38,8 @@ homekit_characteristic_t cha_dehumidifier_target_state = HOMEKIT_CHARACTERISTIC_
 // CN105 reports no humidity; HAP requires this characteristic. A flat 50.0
 // means "never reported" — /control?humidity= pushes overwrite the seed.
 homekit_characteristic_t cha_dehumidifier_current_humidity = HOMEKIT_CHARACTERISTIC_(CURRENT_RELATIVE_HUMIDITY, 50.0);
-// Target RH. Nothing consumes it yet: DRY still engages on the idle band
-// regardless of this value or of any reported reading.
+// Target RH: arms the decision core's DRY latch when a reported reading
+// exceeds it (released at threshold - 5).
 homekit_characteristic_t cha_dehumidifier_threshold = HOMEKIT_CHARACTERISTIC_(RELATIVE_HUMIDITY_DEHUMIDIFIER_THRESHOLD, HUMIDITY_THRESHOLD_DEFAULT);
 
 static homekit_characteristic_t cha_dehumidifier_name = HOMEKIT_CHARACTERISTIC_(NAME, "AC Dehumidifier");
